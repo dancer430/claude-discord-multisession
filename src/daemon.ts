@@ -491,10 +491,7 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
         case 'close_thread':
           return await handleCloseThread(args)
         case 'list_threads':
-          return {
-            content: [{ type: 'text', text: JSON.stringify({ error: 'not_implemented', tool: name }) }],
-            isError: true,
-          }
+          return await handleListThreads()
         default:
           return fail(`unknown tool: ${name}`)
       }
@@ -626,6 +623,35 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
     sessions.delete(sessionId!)
 
     return okJson({ closed: entry.thread_id })
+  }
+
+  async function handleListThreads(): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
+    const { isAlive } = await import('./spawn-manager')
+    const bindings = loadBindings(bindingsFile)
+    const rows: Array<{
+      session_id: string
+      thread_id: string
+      cwd: string
+      label?: string
+      tmux_session?: string
+      tmux_alive: boolean
+      created_at: number
+    }> = []
+    for (const [sid, b] of Object.entries(bindings)) {
+      if (b.managed !== true) continue
+      const alive = b.tmux_session ? await isAlive(tmuxRunner, b.tmux_session) : false
+      rows.push({
+        session_id: sid,
+        thread_id: b.thread_id,
+        cwd: b.cwd,
+        label: b.label,
+        tmux_session: b.tmux_session,
+        tmux_alive: alive,
+        created_at: b.created_at,
+      })
+    }
+    rows.sort((a, b) => b.created_at - a.created_at)
+    return okJson(rows)
   }
 
   function errText(code: string, message: string) {

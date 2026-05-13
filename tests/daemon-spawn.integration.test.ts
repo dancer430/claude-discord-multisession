@@ -288,3 +288,40 @@ describe('daemon: close_thread', () => {
     expect(JSON.parse(result.content[0].text).error).toBe('close_thread_not_found')
   })
 })
+
+describe('daemon: list_threads', () => {
+  test('lists only managed bindings with tmux_alive decoration', async () => {
+    const ops = new FakeDiscordOps()
+    const tmuxRunner = new FakeTmuxRunner()
+    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+    const sockPath = join(dir, 'daemon.sock')
+    const mgr = await registerDm(sockPath, 'mgr-l1')
+
+    writeFileSync(join(dir, 'bindings.json'), JSON.stringify({
+      'sid-managed-alive': {
+        thread_id: 't-a', cwd: '/tmp/a', created_at: 100, last_seen_at: 200,
+        managed: true, tmux_session: 'claude-sid-managed-alive', label: 'feat-A',
+      },
+      'sid-managed-dead': {
+        thread_id: 't-b', cwd: '/tmp/b', created_at: 50, last_seen_at: 150,
+        managed: true, tmux_session: 'claude-sid-managed-dead',
+      },
+      'sid-manual': {
+        thread_id: 't-c', cwd: '/tmp/c', created_at: 10, last_seen_at: 20,
+      },
+    }))
+    tmuxRunner.scriptExit(0)  // alive
+    tmuxRunner.scriptExit(1)  // dead
+
+    writeFrame(mgr.sock, { type: 'tool_call', id: 2, name: 'list_threads', args: {} })
+    const result = await recv(mgr.it)
+    expect(result.isError).toBeFalsy()
+    const arr = JSON.parse(result.content[0].text) as any[]
+    expect(arr).toHaveLength(2)
+    expect(arr[0].session_id).toBe('sid-managed-alive')
+    expect(arr[0].tmux_alive).toBe(true)
+    expect(arr[0].label).toBe('feat-A')
+    expect(arr[1].session_id).toBe('sid-managed-dead')
+    expect(arr[1].tmux_alive).toBe(false)
+  })
+})
