@@ -536,6 +536,10 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
       return errText('create_thread_cwd_has_manual_session', `non-managed binding exists for ${cwd}; pass a label to disambiguate`)
     }
 
+    if (spawnPending.has(sessionId)) {
+      return errText('create_thread_already_spawning', `another create_thread is in flight for ${sessionId}`)
+    }
+
     const registered = new Promise<{ thread_id: string; thread_name?: string; thread_url?: string }>((resolve, reject) => {
       spawnPending.set(sessionId, { resolve, reject })
     })
@@ -927,6 +931,11 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
               // clean state. `dmSessionId` and `mySessionId` are only
               // assigned after a successful writeFrame, so they cannot leak
               // here even if writeFrame throws.
+              const pendingForSid = spawnPending.get(msg.session_id)
+              if (pendingForSid) {
+                spawnPending.delete(msg.session_id)
+                pendingForSid.reject(new Error('register failed before commit'))
+              }
               sessions.delete(msg.session_id)
               if (reservedThreadId !== null) threadIndex.delete(reservedThreadId)
             }

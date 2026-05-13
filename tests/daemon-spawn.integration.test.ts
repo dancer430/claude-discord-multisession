@@ -73,7 +73,6 @@ describe('daemon: create_thread happy path', () => {
 
     writeFrame(mgr.sock, { type: 'tool_call', id: 2, name: 'create_thread', args: { cwd } })
 
-    await new Promise(r => setTimeout(r, 50))
     const child = await simulateChildRegister(sockPath, childSid, cwd)
     expect(child.ack.type).toBe('register_ack')
     expect(child.ack.thread_id).toBeTruthy()
@@ -146,5 +145,58 @@ describe('daemon: create_thread happy path', () => {
     const result = await recv(mgr.it)
     expect(result.isError).toBe(true)
     expect(JSON.parse(result.content[0].text).error).toBe('create_thread_already_running')
+  })
+
+  test('rejects second concurrent create_thread for the same sessionId', async () => {
+    const ops = new FakeDiscordOps()
+    const tmuxRunner = new FakeTmuxRunner()
+    tmuxRunner.scriptExit(0)  // first create_thread's tmux ok
+    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+    const sockPath = join(dir, 'daemon.sock')
+
+    // The DM session acts as the first manager.
+    const mgr1 = await registerDm(sockPath, 'mgr-conc-1')
+
+    // Register a second session as thread-mode using auto so FakeDiscordOps
+    // creates a Discord thread for us (parentChannelId is set in beforeEach).
+    const mgr2Sock = await connect(sockPath)
+    const mgr2It = frameIt(mgr2Sock)
+    writeFrame(mgr2Sock, { type: 'register', id: 1, session_id: 'mgr-conc-2', mode: 'thread', cwd: '/home', thread_id: 'auto' })
+    const mgr2Ack = await recv(mgr2It)
+    expect(mgr2Ack.type).toBe('register_ack')
+
+    const cwd = '/tmp'
+    // Fire both create_thread calls from different connections before either
+    // child registers.  The daemon processes each connection concurrently, so
+    // the second one will hit the spawnPending guard.
+    //
+    // Both recv() calls are started concurrently. We collect both results,
+    // which avoids the dangling-promise unhandled-rejection that a one-shot
+    // Promise.race would leave when the "loser" recv is later rejected by
+    // afterEach socket teardown.
+    writeFrame(mgr1.sock, { type: 'tool_call', id: 2, name: 'create_thread', args: { cwd } })
+    writeFrame(mgr2Sock, { type: 'tool_call', id: 3, name: 'create_thread', args: { cwd } })
+
+    // Drive the child registration concurrently so the blocking call can
+    // complete while we wait for both results.
+    const { sessionId: childSid } = computeSessionId(cwd)
+    const childRegisterPromise = simulateChildRegister(sockPath, childSid, cwd)
+
+    const [result1, result2] = await Promise.all([
+      recv(mgr1.it),
+      recv(mgr2It),
+    ])
+    const child = await childRegisterPromise
+    expect(child.ack.type).toBe('register_ack')
+
+    // Exactly one must be the already_spawning error; the other must succeed.
+    const results = [result1, result2]
+    const errorResult = results.find(r => r.isError)
+    const successResult = results.find(r => !r.isError)
+    expect(errorResult).toBeDefined()
+    expect(successResult).toBeDefined()
+    expect(JSON.parse(errorResult!.content[0].text).error).toBe('create_thread_already_spawning')
+    const payload = JSON.parse(successResult!.content[0].text)
+    expect(payload.session_id).toBe(childSid)
   })
 })
