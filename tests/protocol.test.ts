@@ -89,4 +89,11 @@ describe('protocol', () => {
       expect(m).toMatchObject({ type: 'register_err', code })
     }
   })
+
+  test('parseShimMsg accepts new spawn tool names', () => {
+    for (const name of ['create_thread', 'close_thread', 'list_threads'] as const) {
+      const parsed = parseShimMsg({ type: 'tool_call', id: 1, name, args: {} })
+      expect(parsed.type).toBe('tool_call')
+    }
+  })
 })

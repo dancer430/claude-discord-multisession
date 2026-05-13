@@ -67,7 +67,10 @@ export const RegisterErrMsg = z.object({
 export const ToolCallMsg = z.object({
   type: z.literal('tool_call'),
   id: z.number(),
-  name: z.enum(['reply', 'react', 'edit_message', 'fetch_messages', 'download_attachment', 'discord_ask']),
+  name: z.enum([
+    'reply', 'react', 'edit_message', 'fetch_messages', 'download_attachment', 'discord_ask',
+    'create_thread', 'close_thread', 'list_threads',
+  ]),
   args: z.record(z.string(), z.unknown()),
 })
 
