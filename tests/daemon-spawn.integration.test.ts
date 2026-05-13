@@ -325,3 +325,34 @@ describe('daemon: list_threads', () => {
     expect(arr[1].tmux_alive).toBe(false)
   })
 })
+
+describe('daemon: natural-exit watcher', () => {
+  test('posts [session exited] and clears tmux_session when isAlive flips to false', async () => {
+    const ops = new FakeDiscordOps()
+    const tmuxRunner = new FakeTmuxRunner()
+    const sessionId = 'sid-watch'
+    writeFileSync(join(dir, 'bindings.json'), JSON.stringify({
+      [sessionId]: {
+        thread_id: 't-watch', cwd: '/tmp/w', created_at: 1, last_seen_at: 2,
+        managed: true, tmux_session: 'claude-' + sessionId,
+      },
+    }))
+    // Startup reconcile sees alive (exit 0); first watcher tick sees dead (exit 1).
+    tmuxRunner.scriptExit(0)
+    tmuxRunner.scriptExit(1)
+
+    daemon = await startDaemon({
+      stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner,
+      watcherIntervalMs: 20,
+    })
+
+    // Wait long enough for one watcher tick.
+    await new Promise(r => setTimeout(r, 100))
+
+    expect(ops.calls.some(c => c.kind === 'archiveThread')).toBe(false)
+    expect(ops.calls.some(c => c.kind === 'reply' && c.chat_id === 't-watch' && String(c.text).includes('[session exited]'))).toBe(true)
+    const after = loadBindings(join(dir, 'bindings.json'))[sessionId]
+    expect(after.managed).toBe(true)
+    expect(after.tmux_session).toBeUndefined()
+  })
+})

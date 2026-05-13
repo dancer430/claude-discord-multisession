@@ -45,6 +45,8 @@ export type DaemonOpts = {
    * alive — leaving a zombie daemon with no IPC socket.
    */
   onShutdown?: () => void | Promise<void>
+  /** Test hook: poll interval (ms) for the natural-exit watcher. Default 5_000. */
+  watcherIntervalMs?: number
 }
 
 export type DaemonHandle = {
@@ -265,6 +267,9 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
   }
   const spawnPending = new Map<string, PendingSpawn>()
 
+  const watcherIntervalMs = opts.watcherIntervalMs ?? 5_000
+  const watchSet = new Set<string>()
+
   function deliverInbound(ev: InboundEvent): void {
     const access = loadAccess(accessFile)
     const pruned = pruneExpired(access)
@@ -329,6 +334,7 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
 
   const clients = new Set<Socket>()
   let idleTimer: NodeJS.Timeout | null = null
+  let watchTimer: ReturnType<typeof setInterval> | null = null
   function armIdle() {
     if (idleTimer) clearTimeout(idleTimer)
     if (clients.size === 0) {
@@ -342,6 +348,7 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
     if (stopped) return
     stopped = true
     if (idleTimer) clearTimeout(idleTimer)
+    if (watchTimer) clearInterval(watchTimer)
     for (const c of clients) { try { c.destroy() } catch {} }
     await new Promise<void>(r => server.close(() => r()))
     try { unlinkSync(sockPath) } catch {}
@@ -571,6 +578,7 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
       })
     }
 
+    watchSet.add(sessionId)
     return okJson({
       session_id: sessionId,
       thread_id: info.thread_id,
@@ -621,6 +629,7 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
 
     threadIndex.delete(entry.thread_id)
     sessions.delete(sessionId!)
+    watchSet.delete(sessionId!)
 
     return okJson({ closed: entry.thread_id })
   }
@@ -652,6 +661,38 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
     }
     rows.sort((a, b) => b.created_at - a.created_at)
     return okJson(rows)
+  }
+
+  async function reconcileOnStartup(): Promise<void> {
+    const { isAlive } = await import('./spawn-manager')
+    const bindings = loadBindings(bindingsFile)
+    for (const [sid, b] of Object.entries(bindings)) {
+      if (b.managed !== true || !b.tmux_session) continue
+      if (await isAlive(tmuxRunner, b.tmux_session)) {
+        watchSet.add(sid)
+      } else {
+        await upsertBinding(bindingsFile, sid, { ...b, tmux_session: undefined })
+      }
+    }
+  }
+
+  async function watcherTick(): Promise<void> {
+    const { isAlive } = await import('./spawn-manager')
+    const bindings = loadBindings(bindingsFile)
+    for (const sid of Array.from(watchSet)) {
+      const b = bindings[sid]
+      if (!b || !b.managed || !b.tmux_session) {
+        watchSet.delete(sid)
+        continue
+      }
+      if (!(await isAlive(tmuxRunner, b.tmux_session))) {
+        watchSet.delete(sid)
+        try { await ops.reply(b.thread_id, '[session exited]') }
+        catch (e) { process.stderr.write(`watcher: reply failed for ${b.thread_id}: ${String((e as Error).message)}\n`) }
+        await upsertBinding(bindingsFile, sid, { ...b, tmux_session: undefined })
+        process.stderr.write(`discord daemon: session_exited session_id=${sid} thread_id=${b.thread_id}\n`)
+      }
+    }
   }
 
   function errText(code: string, message: string) {
@@ -1090,6 +1131,10 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
   })
 
   armIdle()
+
+  await reconcileOnStartup()
+  watchTimer = setInterval(() => { void watcherTick() }, watcherIntervalMs)
+  watchTimer.unref?.()
 
   return { shutdown, deliverInbound, permissionDecision, pendingPermissions }
 }
