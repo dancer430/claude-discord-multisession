@@ -62,6 +62,13 @@ export class FakeTmuxRunner implements TmuxRunner {
 // Spawn-manager helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Proxy env injected into every spawned `claude` process. Hardcoded by
+ * design (per the project owner): every spawn assumes a local proxy at
+ * 127.0.0.1:7897. Spawned sessions will fail to reach the network on
+ * machines without that proxy — change this constant (or PR a config
+ * surface) before deploying anywhere else.
+ */
 export const PROXY_ENV = {
   http_proxy: 'http://127.0.0.1:7897',
   https_proxy: 'http://127.0.0.1:7897',

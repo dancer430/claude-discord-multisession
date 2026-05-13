@@ -124,6 +124,24 @@ describe('startSpawn', () => {
     expect(command).toContain("DISCORD_THREAD_NAME='my custom name'")
   })
 
+  test('label + threadNameOverride: override wins for name; CLAUDE_SESSION_ID still set from label', async () => {
+    const runner = new FakeTmuxRunner()
+    runner.scriptExit(0)
+    await startSpawn({
+      runner,
+      sessionId: 'sidcombosidcombo'.slice(0, 12),
+      cwd: '/tmp/proj',
+      label: 'feat-A',
+      threadNameOverride: 'my override',
+      claudePath: '/usr/bin/claude',
+    })
+    const command = runner.calls[0][4]
+    expect(command).toContain('CLAUDE_SESSION_ID=')
+    expect(command).toContain("DISCORD_THREAD_NAME='my override'")
+    // override wins for thread_name; label's [feat-A] suffix MUST NOT appear.
+    expect(command).not.toMatch(/\[feat-A\]/)
+  })
+
   test('throws when tmux exits non-zero', async () => {
     const runner = new FakeTmuxRunner()
     runner.scriptExit(1, '', 'duplicate session: claude-x')
