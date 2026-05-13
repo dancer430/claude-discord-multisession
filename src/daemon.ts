@@ -259,6 +259,12 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
   const pendingPermissions = new Map<string, PendingPermission>()
   let dmSessionId: string | null = null
 
+  type PendingSpawn = {
+    resolve: (info: { thread_id: string; thread_name?: string; thread_url?: string }) => void
+    reject: (err: Error) => void
+  }
+  const spawnPending = new Map<string, PendingSpawn>()
+
   function deliverInbound(ev: InboundEvent): void {
     const access = loadAccess(accessFile)
     const pruned = pruneExpired(access)
@@ -481,6 +487,7 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
           return { content: [{ type: 'text', text: answerToText(result) }] }
         }
         case 'create_thread':
+          return await handleCreateThread(args)
         case 'close_thread':
         case 'list_threads':
           return {
@@ -494,6 +501,90 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
       const m = err instanceof Error ? err.message : String(err)
       return fail(`${name} failed: ${m}`)
     }
+  }
+
+  async function handleCreateThread(args: Record<string, unknown>): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
+    const cwd = String(args.cwd ?? '')
+    const label = args.label !== undefined ? String(args.label) : undefined
+    const threadNameOverride = args.thread_name !== undefined ? String(args.thread_name) : undefined
+    if (!cwd) return errText('create_thread_invalid_cwd', 'cwd is required')
+
+    try {
+      const { statSync } = await import('fs')
+      const st = statSync(cwd)
+      if (!st.isDirectory()) return errText('create_thread_invalid_cwd', `${cwd} is not a directory`)
+    } catch (e) {
+      return errText('create_thread_invalid_cwd', `${cwd}: ${String((e as Error).message)}`)
+    }
+
+    const access = loadAccess(accessFile)
+    if (!access.parentChannelId) {
+      return errText('create_thread_parent_unset', 'access.parentChannelId is not set')
+    }
+
+    const { computeSessionId, tmuxSessionName, startSpawn, killSpawn, isAlive } = await import('./spawn-manager')
+    const { sessionId } = computeSessionId(cwd, label)
+    const tmuxSession = tmuxSessionName(sessionId)
+    const bindings = loadBindings(bindingsFile)
+    const existing = bindings[sessionId]
+    if (existing?.managed && existing.tmux_session) {
+      if (await isAlive(tmuxRunner, existing.tmux_session)) {
+        return errText('create_thread_already_running', `binding for ${sessionId} already alive in ${existing.tmux_session}`)
+      }
+      await upsertBinding(bindingsFile, sessionId, { ...existing, tmux_session: undefined })
+    } else if (existing && !existing.managed) {
+      return errText('create_thread_cwd_has_manual_session', `non-managed binding exists for ${cwd}; pass a label to disambiguate`)
+    }
+
+    const registered = new Promise<{ thread_id: string; thread_name?: string; thread_url?: string }>((resolve, reject) => {
+      spawnPending.set(sessionId, { resolve, reject })
+    })
+
+    try {
+      await startSpawn({ runner: tmuxRunner, sessionId, cwd, label, threadNameOverride, claudePath })
+    } catch (e) {
+      spawnPending.delete(sessionId)
+      return errText('create_thread_spawn_failed', String((e as Error).message))
+    }
+
+    let info: { thread_id: string; thread_name?: string; thread_url?: string }
+    try {
+      info = await Promise.race([
+        registered,
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('register timed out')), 30_000)),
+      ])
+    } catch {
+      spawnPending.delete(sessionId)
+      await killSpawn(tmuxRunner, tmuxSession)
+      return errText('create_thread_register_timeout', 'child claude did not register within 30s')
+    }
+
+    const fresh = loadBindings(bindingsFile)[sessionId]
+    if (fresh) {
+      await upsertBinding(bindingsFile, sessionId, {
+        ...fresh,
+        managed: true,
+        tmux_session: tmuxSession,
+        ...(label ? { label } : {}),
+      })
+    }
+
+    return okJson({
+      session_id: sessionId,
+      thread_id: info.thread_id,
+      thread_name: info.thread_name,
+      thread_url: info.thread_url,
+      tmux_session: tmuxSession,
+      cwd,
+      label,
+    })
+  }
+
+  function errText(code: string, message: string) {
+    return { content: [{ type: 'text' as const, text: JSON.stringify({ error: code, message }) }], isError: true }
+  }
+  function okJson(obj: unknown) {
+    return { content: [{ type: 'text' as const, text: JSON.stringify(obj) }] }
   }
 
   async function handleConnection(sock: Socket): Promise<void> {
@@ -611,6 +702,12 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
           // thread_id) the binding now". Set per branch, logged once at the
           // single thread-mode success site below.
           let reuseFlag = false
+          // freshThreadInfo is set only in the auto fresh-create branch when
+          // ops.createThread succeeds. It carries the full ThreadInfo so the
+          // pending-spawn hook below can forward thread_name/thread_url to
+          // the waiting handleCreateThread caller. Scoped here (not at
+          // function top) so it is reset on every register iteration.
+          let freshThreadInfo: { thread_id: string; thread_name?: string; thread_url?: string } | null = null
           try {
             if (msg.mode === 'dm') {
               if (dmSessionId !== null) {
@@ -670,6 +767,7 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
                   const t = await ops.createThread(access.parentChannelId, name)
                   threadId = t.thread_id
                   parentId = access.parentChannelId
+                  freshThreadInfo = t
                 } catch (err) {
                   const errMessage = `createThread failed: ${err instanceof Error ? err.message : String(err)}`
                   writeFrame(sock, { type: 'register_err', id: msg.id, code: 'discord_unavailable', message: errMessage })
@@ -810,6 +908,17 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
             sessions.set(msg.session_id, { session_id: msg.session_id, mode: 'thread', thread_id: threadId, parent_id: parentId, sock })
             mySessionId = msg.session_id
             committed = true
+            // Pending spawn-flow promise resolves here so create_thread can
+            // patch the just-persisted binding with managed/tmux_session.
+            const pending = spawnPending.get(msg.session_id)
+            if (pending) {
+              spawnPending.delete(msg.session_id)
+              pending.resolve({
+                thread_id: threadId,
+                thread_name: freshThreadInfo?.thread_name,
+                thread_url: freshThreadInfo?.thread_url,
+              })
+            }
           } finally {
             if (!committed) {
               // Release every reservation we made before the failure point.
