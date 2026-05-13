@@ -226,6 +226,36 @@ function registerHandlers(server: Server): void {
           required: ['questions'],
         },
       },
+      {
+        name: 'create_thread',
+        description: 'Spawn a new Claude Code session in the given cwd, paired to a freshly created Discord thread. The spawned claude runs inside a detached tmux session named claude-<session_id>. Returns thread_id/thread_url/tmux_session/session_id.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            cwd: { type: 'string', description: 'Absolute path to the project directory the spawned claude should run in.' },
+            label: { type: 'string', description: 'Optional disambiguator when you want multiple sessions in the same cwd.' },
+            thread_name: { type: 'string', description: 'Override the auto-derived thread name.' },
+          },
+          required: ['cwd'],
+        },
+      },
+      {
+        name: 'close_thread',
+        description: 'Tear down a managed thread: kill its tmux session, archive the Discord thread, remove the binding. Pass thread_id OR cwd (with optional label).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            thread_id: { type: 'string' },
+            cwd: { type: 'string' },
+            label: { type: 'string' },
+          },
+        },
+      },
+      {
+        name: 'list_threads',
+        description: 'List all managed (create_thread-spawned) sessions with cwd, tmux liveness, and Discord thread metadata.',
+        inputSchema: { type: 'object', properties: {} },
+      },
     ],
   }))
 
