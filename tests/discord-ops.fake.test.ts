@@ -22,4 +22,12 @@ describe('FakeDiscordOps', () => {
     expect(await ops.verifyThreadParent(thread_id)).toBe('parent-1')
     expect(await ops.verifyThreadParent('unknown')).toBeNull()
   })
+
+  test('archiveThread records and marks thread archived', async () => {
+    const fake = new FakeDiscordOps()
+    const { thread_id } = await fake.createThread('parent-1', 'topic')
+    await fake.archiveThread(thread_id)
+    expect(fake.calls.some(c => c.kind === 'archiveThread' && c.thread_id === thread_id)).toBe(true)
+    expect(fake.isArchived(thread_id)).toBe(true)
+  })
 })
