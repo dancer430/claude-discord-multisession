@@ -31,6 +31,7 @@ Single-host only by design; multi-machine is out of scope.
 ## Prerequisites
 
 - [Bun](https://bun.sh) — `curl -fsSL https://bun.sh/install | bash`
+- [tmux](https://github.com/tmux/tmux) — `brew install tmux` on macOS — required only when you use the `create_thread` MCP tool to spawn child sessions; manual `claude` launches do not need it.
 - A clone of this repo somewhere on disk (it's a private fork, installed via
   a local marketplace rather than `claude-plugins-official`).
 
