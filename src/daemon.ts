@@ -9,6 +9,10 @@ import { loadAccess, saveAccess, pruneExpired } from './access'
 import { loadBindings, upsertBinding, migrateBindingKey } from './bindings'
 import { deriveThreadName } from './session-id'
 import { gate, type GateInput } from './gate'
+import {
+  type TmuxRunner,
+  RealTmuxRunner,
+} from './spawn-manager'
 
 export type InboundEvent = {
   chat_id: string
@@ -30,6 +34,10 @@ export type DaemonOpts = {
   stateDir: string
   ops: DiscordOps
   idleExitMs: number
+  /** Injectable tmux runner; defaults to RealTmuxRunner. Tests pass FakeTmuxRunner. */
+  tmuxRunner?: TmuxRunner
+  /** Override the claude binary path used by create_thread spawn. Defaults to 'claude' from PATH. */
+  claudePath?: string
   /**
    * Called after the internal shutdown unlinks sock + pid. The entrypoint
    * uses this to destroy the discord.js client and call `process.exit(0)`,
@@ -227,6 +235,8 @@ async function probeStaleSocket(sockPath: string): Promise<void> {
 
 export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
   const { stateDir, ops, idleExitMs, onShutdown } = opts
+  const tmuxRunner: TmuxRunner = opts.tmuxRunner ?? new RealTmuxRunner()
+  const claudePath = opts.claudePath ?? 'claude'
   mkdirSync(stateDir, { recursive: true, mode: 0o700 })
   const sockPath = join(stateDir, 'daemon.sock')
   const pidPath = join(stateDir, 'daemon.pid')
@@ -470,6 +480,13 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
           const result = await ops.ask(route, request_id, parsed.data, { allowFrom, timeoutMs })
           return { content: [{ type: 'text', text: answerToText(result) }] }
         }
+        case 'create_thread':
+        case 'close_thread':
+        case 'list_threads':
+          return {
+            content: [{ type: 'text', text: JSON.stringify({ error: 'not_implemented', tool: name }) }],
+            isError: true,
+          }
         default:
           return fail(`unknown tool: ${name}`)
       }
