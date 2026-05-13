@@ -356,3 +356,33 @@ describe('daemon: natural-exit watcher', () => {
     expect(after.tmux_session).toBeUndefined()
   })
 })
+
+describe('daemon: startup reconcile', () => {
+  test('alive managed binding stays watched; dead one has tmux_session cleared', async () => {
+    const ops = new FakeDiscordOps()
+    const tmuxRunner = new FakeTmuxRunner()
+    writeFileSync(join(dir, 'bindings.json'), JSON.stringify({
+      'sid-alive': {
+        thread_id: 't-alive', cwd: '/tmp/a', created_at: 1, last_seen_at: 2,
+        managed: true, tmux_session: 'claude-sid-alive',
+      },
+      'sid-dead': {
+        thread_id: 't-dead', cwd: '/tmp/d', created_at: 1, last_seen_at: 2,
+        managed: true, tmux_session: 'claude-sid-dead',
+      },
+    }))
+    // Reconcile pings has-session once per managed entry: alive first, dead next.
+    tmuxRunner.scriptExit(0)
+    tmuxRunner.scriptExit(1)
+
+    daemon = await startDaemon({
+      stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner,
+      watcherIntervalMs: 60_000,  // suppress watcher ticks during this test
+    })
+
+    const after = loadBindings(join(dir, 'bindings.json'))
+    expect(after['sid-alive'].tmux_session).toBe('claude-sid-alive')
+    expect(after['sid-dead'].tmux_session).toBeUndefined()
+    expect(after['sid-dead'].managed).toBe(true)  // managed flag preserved
+  })
+})
