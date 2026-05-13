@@ -9,6 +9,10 @@ import { loadAccess, saveAccess, pruneExpired } from './access'
 import { loadBindings, upsertBinding, migrateBindingKey } from './bindings'
 import { deriveThreadName } from './session-id'
 import { gate, type GateInput } from './gate'
+import {
+  type TmuxRunner,
+  RealTmuxRunner,
+} from './spawn-manager'
 
 export type InboundEvent = {
   chat_id: string
@@ -30,6 +34,10 @@ export type DaemonOpts = {
   stateDir: string
   ops: DiscordOps
   idleExitMs: number
+  /** Injectable tmux runner; defaults to RealTmuxRunner. Tests pass FakeTmuxRunner. */
+  tmuxRunner?: TmuxRunner
+  /** Override the claude binary path used by create_thread spawn. Defaults to 'claude' from PATH. */
+  claudePath?: string
   /**
    * Called after the internal shutdown unlinks sock + pid. The entrypoint
    * uses this to destroy the discord.js client and call `process.exit(0)`,
@@ -37,6 +45,8 @@ export type DaemonOpts = {
    * alive — leaving a zombie daemon with no IPC socket.
    */
   onShutdown?: () => void | Promise<void>
+  /** Test hook: poll interval (ms) for the natural-exit watcher. Default 5_000. */
+  watcherIntervalMs?: number
 }
 
 export type DaemonHandle = {
@@ -227,6 +237,8 @@ async function probeStaleSocket(sockPath: string): Promise<void> {
 
 export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
   const { stateDir, ops, idleExitMs, onShutdown } = opts
+  const tmuxRunner: TmuxRunner = opts.tmuxRunner ?? new RealTmuxRunner()
+  const claudePath = opts.claudePath ?? 'claude'
   mkdirSync(stateDir, { recursive: true, mode: 0o700 })
   const sockPath = join(stateDir, 'daemon.sock')
   const pidPath = join(stateDir, 'daemon.pid')
@@ -248,6 +260,15 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
   const permRoutes = new Map<string, string>()   // request_id → session_id
   const pendingPermissions = new Map<string, PendingPermission>()
   let dmSessionId: string | null = null
+
+  type PendingSpawn = {
+    resolve: (info: { thread_id: string; thread_name?: string; thread_url?: string }) => void
+    reject: (err: Error) => void
+  }
+  const spawnPending = new Map<string, PendingSpawn>()
+
+  const watcherIntervalMs = opts.watcherIntervalMs ?? 5_000
+  const watchSet = new Set<string>()
 
   function deliverInbound(ev: InboundEvent): void {
     const access = loadAccess(accessFile)
@@ -313,6 +334,7 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
 
   const clients = new Set<Socket>()
   let idleTimer: NodeJS.Timeout | null = null
+  let watchTimer: ReturnType<typeof setInterval> | null = null
   function armIdle() {
     if (idleTimer) clearTimeout(idleTimer)
     if (clients.size === 0) {
@@ -326,6 +348,7 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
     if (stopped) return
     stopped = true
     if (idleTimer) clearTimeout(idleTimer)
+    if (watchTimer) clearInterval(watchTimer)
     for (const c of clients) { try { c.destroy() } catch {} }
     await new Promise<void>(r => server.close(() => r()))
     try { unlinkSync(sockPath) } catch {}
@@ -470,6 +493,12 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
           const result = await ops.ask(route, request_id, parsed.data, { allowFrom, timeoutMs })
           return { content: [{ type: 'text', text: answerToText(result) }] }
         }
+        case 'create_thread':
+          return await handleCreateThread(args)
+        case 'close_thread':
+          return await handleCloseThread(args)
+        case 'list_threads':
+          return await handleListThreads()
         default:
           return fail(`unknown tool: ${name}`)
       }
@@ -477,6 +506,200 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
       const m = err instanceof Error ? err.message : String(err)
       return fail(`${name} failed: ${m}`)
     }
+  }
+
+  async function handleCreateThread(args: Record<string, unknown>): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
+    const cwd = String(args.cwd ?? '')
+    const label = args.label !== undefined ? String(args.label) : undefined
+    const threadNameOverride = args.thread_name !== undefined ? String(args.thread_name) : undefined
+    if (!cwd) return errText('create_thread_invalid_cwd', 'cwd is required')
+
+    try {
+      const { statSync } = await import('fs')
+      const st = statSync(cwd)
+      if (!st.isDirectory()) return errText('create_thread_invalid_cwd', `${cwd} is not a directory`)
+    } catch (e) {
+      return errText('create_thread_invalid_cwd', `${cwd}: ${String((e as Error).message)}`)
+    }
+
+    const access = loadAccess(accessFile)
+    if (!access.parentChannelId) {
+      return errText('create_thread_parent_unset', 'access.parentChannelId is not set')
+    }
+
+    const { computeSessionId, tmuxSessionName, startSpawn, killSpawn, isAlive } = await import('./spawn-manager')
+    const { sessionId } = computeSessionId(cwd, label)
+    const tmuxSession = tmuxSessionName(sessionId)
+    const bindings = loadBindings(bindingsFile)
+    const existing = bindings[sessionId]
+    if (existing?.managed && existing.tmux_session) {
+      if (await isAlive(tmuxRunner, existing.tmux_session)) {
+        return errText('create_thread_already_running', `binding for ${sessionId} already alive in ${existing.tmux_session}`)
+      }
+      await upsertBinding(bindingsFile, sessionId, { ...existing, tmux_session: undefined })
+    } else if (existing && !existing.managed) {
+      return errText('create_thread_cwd_has_manual_session', `non-managed binding exists for ${cwd}; pass a label to disambiguate`)
+    }
+
+    if (spawnPending.has(sessionId)) {
+      return errText('create_thread_already_spawning', `another create_thread is in flight for ${sessionId}`)
+    }
+
+    const registered = new Promise<{ thread_id: string; thread_name?: string; thread_url?: string }>((resolve, reject) => {
+      spawnPending.set(sessionId, { resolve, reject })
+    })
+
+    try {
+      await startSpawn({ runner: tmuxRunner, sessionId, cwd, label, threadNameOverride, claudePath })
+    } catch (e) {
+      spawnPending.delete(sessionId)
+      return errText('create_thread_spawn_failed', String((e as Error).message))
+    }
+
+    let info: { thread_id: string; thread_name?: string; thread_url?: string }
+    try {
+      info = await Promise.race([
+        registered,
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('register timed out')), 30_000)),
+      ])
+    } catch {
+      spawnPending.delete(sessionId)
+      await killSpawn(tmuxRunner, tmuxSession)
+      return errText('create_thread_register_timeout', 'child claude did not register within 30s')
+    }
+
+    const fresh = loadBindings(bindingsFile)[sessionId]
+    if (fresh) {
+      await upsertBinding(bindingsFile, sessionId, {
+        ...fresh,
+        managed: true,
+        tmux_session: tmuxSession,
+        ...(label ? { label } : {}),
+      })
+    }
+
+    watchSet.add(sessionId)
+    return okJson({
+      session_id: sessionId,
+      thread_id: info.thread_id,
+      thread_name: info.thread_name,
+      thread_url: info.thread_url,
+      tmux_session: tmuxSession,
+      cwd,
+      label,
+    })
+  }
+
+  async function handleCloseThread(args: Record<string, unknown>): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
+    const { computeSessionId, killSpawn } = await import('./spawn-manager')
+    const { removeBinding } = await import('./bindings')
+
+    const threadIdArg = args.thread_id !== undefined ? String(args.thread_id) : undefined
+    const cwdArg = args.cwd !== undefined ? String(args.cwd) : undefined
+    const labelArg = args.label !== undefined ? String(args.label) : undefined
+
+    const bindings = loadBindings(bindingsFile)
+    let sessionId: string | undefined
+    let entry: typeof bindings[string] | undefined
+
+    if (threadIdArg) {
+      for (const [k, v] of Object.entries(bindings)) {
+        if (v.thread_id === threadIdArg) { sessionId = k; entry = v; break }
+      }
+    } else if (cwdArg) {
+      const computed = computeSessionId(cwdArg, labelArg).sessionId
+      sessionId = computed
+      entry = bindings[computed]
+    } else {
+      return errText('close_thread_not_found', 'must pass thread_id or cwd')
+    }
+
+    if (!entry) return errText('close_thread_not_found', 'no binding matches the target')
+    if (!entry.managed) return errText('close_thread_unmanaged', 'binding is not managed; cannot close via close_thread')
+
+    if (entry.tmux_session) {
+      await killSpawn(tmuxRunner, entry.tmux_session)
+    }
+    try {
+      await ops.archiveThread(entry.thread_id)
+    } catch (e) {
+      process.stderr.write(`close_thread: archiveThread failed for ${entry.thread_id}: ${String((e as Error).message)}\n`)
+    }
+    await removeBinding(bindingsFile, sessionId!)
+
+    threadIndex.delete(entry.thread_id)
+    sessions.delete(sessionId!)
+    watchSet.delete(sessionId!)
+
+    return okJson({ closed: entry.thread_id })
+  }
+
+  async function handleListThreads(): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
+    const { isAlive } = await import('./spawn-manager')
+    const bindings = loadBindings(bindingsFile)
+    const rows: Array<{
+      session_id: string
+      thread_id: string
+      cwd: string
+      label?: string
+      tmux_session?: string
+      tmux_alive: boolean
+      created_at: number
+    }> = []
+    for (const [sid, b] of Object.entries(bindings)) {
+      if (b.managed !== true) continue
+      const alive = b.tmux_session ? await isAlive(tmuxRunner, b.tmux_session) : false
+      rows.push({
+        session_id: sid,
+        thread_id: b.thread_id,
+        cwd: b.cwd,
+        label: b.label,
+        tmux_session: b.tmux_session,
+        tmux_alive: alive,
+        created_at: b.created_at,
+      })
+    }
+    rows.sort((a, b) => b.created_at - a.created_at)
+    return okJson(rows)
+  }
+
+  async function reconcileOnStartup(): Promise<void> {
+    const { isAlive } = await import('./spawn-manager')
+    const bindings = loadBindings(bindingsFile)
+    for (const [sid, b] of Object.entries(bindings)) {
+      if (b.managed !== true || !b.tmux_session) continue
+      if (await isAlive(tmuxRunner, b.tmux_session)) {
+        watchSet.add(sid)
+      } else {
+        await upsertBinding(bindingsFile, sid, { ...b, tmux_session: undefined })
+      }
+    }
+  }
+
+  async function watcherTick(): Promise<void> {
+    const { isAlive } = await import('./spawn-manager')
+    const bindings = loadBindings(bindingsFile)
+    for (const sid of Array.from(watchSet)) {
+      const b = bindings[sid]
+      if (!b || !b.managed || !b.tmux_session) {
+        watchSet.delete(sid)
+        continue
+      }
+      if (!(await isAlive(tmuxRunner, b.tmux_session))) {
+        watchSet.delete(sid)
+        try { await ops.reply(b.thread_id, '[session exited]') }
+        catch (e) { process.stderr.write(`watcher: reply failed for ${b.thread_id}: ${String((e as Error).message)}\n`) }
+        await upsertBinding(bindingsFile, sid, { ...b, tmux_session: undefined })
+        process.stderr.write(`discord daemon: session_exited session_id=${sid} thread_id=${b.thread_id}\n`)
+      }
+    }
+  }
+
+  function errText(code: string, message: string) {
+    return { content: [{ type: 'text' as const, text: JSON.stringify({ error: code, message }) }], isError: true }
+  }
+  function okJson(obj: unknown) {
+    return { content: [{ type: 'text' as const, text: JSON.stringify(obj) }] }
   }
 
   async function handleConnection(sock: Socket): Promise<void> {
@@ -594,6 +817,12 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
           // thread_id) the binding now". Set per branch, logged once at the
           // single thread-mode success site below.
           let reuseFlag = false
+          // freshThreadInfo is set only in the auto fresh-create branch when
+          // ops.createThread succeeds. It carries the full ThreadInfo so the
+          // pending-spawn hook below can forward thread_name/thread_url to
+          // the waiting handleCreateThread caller. Scoped here (not at
+          // function top) so it is reset on every register iteration.
+          let freshThreadInfo: { thread_id: string; thread_name?: string; thread_url?: string } | null = null
           try {
             if (msg.mode === 'dm') {
               if (dmSessionId !== null) {
@@ -653,6 +882,7 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
                   const t = await ops.createThread(access.parentChannelId, name)
                   threadId = t.thread_id
                   parentId = access.parentChannelId
+                  freshThreadInfo = t
                 } catch (err) {
                   const errMessage = `createThread failed: ${err instanceof Error ? err.message : String(err)}`
                   writeFrame(sock, { type: 'register_err', id: msg.id, code: 'discord_unavailable', message: errMessage })
@@ -793,6 +1023,17 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
             sessions.set(msg.session_id, { session_id: msg.session_id, mode: 'thread', thread_id: threadId, parent_id: parentId, sock })
             mySessionId = msg.session_id
             committed = true
+            // Pending spawn-flow promise resolves here so create_thread can
+            // patch the just-persisted binding with managed/tmux_session.
+            const pending = spawnPending.get(msg.session_id)
+            if (pending) {
+              spawnPending.delete(msg.session_id)
+              pending.resolve({
+                thread_id: threadId,
+                thread_name: freshThreadInfo?.thread_name,
+                thread_url: freshThreadInfo?.thread_url,
+              })
+            }
           } finally {
             if (!committed) {
               // Release every reservation we made before the failure point.
@@ -801,6 +1042,11 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
               // clean state. `dmSessionId` and `mySessionId` are only
               // assigned after a successful writeFrame, so they cannot leak
               // here even if writeFrame throws.
+              const pendingForSid = spawnPending.get(msg.session_id)
+              if (pendingForSid) {
+                spawnPending.delete(msg.session_id)
+                pendingForSid.reject(new Error('register failed before commit'))
+              }
               sessions.delete(msg.session_id)
               if (reservedThreadId !== null) threadIndex.delete(reservedThreadId)
             }
@@ -885,6 +1131,10 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
   })
 
   armIdle()
+
+  await reconcileOnStartup()
+  watchTimer = setInterval(() => { void watcherTick() }, watcherIntervalMs)
+  watchTimer.unref?.()
 
   return { shutdown, deliverInbound, permissionDecision, pendingPermissions }
 }

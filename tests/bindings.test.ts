@@ -6,6 +6,7 @@ import {
   loadBindings,
   saveBindings,
   upsertBinding,
+  removeBinding,
   migrateBindingKey,
   type Bindings,
 } from '../src/bindings'
@@ -228,6 +229,39 @@ describe('bindings', () => {
       const onDisk = loadBindings(file)
       expect(Object.keys(onDisk).sort()).toEqual(['external', 'first', 'second'])
       expect(onDisk.external.thread_id).toBe('t-ext')
+    })
+  })
+
+  test('roundtrips managed/tmux_session/label fields', async () => {
+    const b: Bindings = {
+      sess1: {
+        thread_id: 't1',
+        cwd: '/a',
+        created_at: 100,
+        last_seen_at: 200,
+        managed: true,
+        tmux_session: 'claude-sess1',
+        label: 'feat-A',
+      },
+    }
+    await saveBindings(file, b)
+    expect(loadBindings(file)).toEqual(b)
+  })
+
+  test('removeBinding deletes the entry and preserves others', async () => {
+    await upsertBinding(file, 'keep', { thread_id: 't1', cwd: '/a', created_at: 1, last_seen_at: 2 })
+    await upsertBinding(file, 'gone', { thread_id: 't2', cwd: '/b', created_at: 3, last_seen_at: 4 })
+    await removeBinding(file, 'gone')
+    expect(loadBindings(file)).toEqual({
+      keep: { thread_id: 't1', cwd: '/a', created_at: 1, last_seen_at: 2 },
+    })
+  })
+
+  test('removeBinding on missing key is a no-op', async () => {
+    await upsertBinding(file, 'keep', { thread_id: 't1', cwd: '/a', created_at: 1, last_seen_at: 2 })
+    await removeBinding(file, 'never-existed')
+    expect(loadBindings(file)).toEqual({
+      keep: { thread_id: 't1', cwd: '/a', created_at: 1, last_seen_at: 2 },
     })
   })
 })

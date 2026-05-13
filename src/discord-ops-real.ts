@@ -169,6 +169,14 @@ export class RealDiscordOps implements DiscordOps {
     return { thread_id: t.id, thread_name: t.name, thread_url: url }
   }
 
+  async archiveThread(thread_id: string): Promise<void> {
+    const ch: any = await this.client.channels.fetch(thread_id)
+    if (!ch || typeof ch.setArchived !== 'function') {
+      throw new Error(`channel ${thread_id} is not an archivable thread`)
+    }
+    await ch.setArchived(true, 'close_thread')
+  }
+
   async verifyThreadParent(thread_id: string): Promise<string | null> {
     try {
       const ch: any = await this.client.channels.fetch(thread_id)

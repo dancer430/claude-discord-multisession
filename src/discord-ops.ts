@@ -45,6 +45,7 @@ export interface DiscordOps {
   fetch(chat_id: string, limit: number): Promise<FetchedMessage[]>
   downloadAttachments(chat_id: string, message_id: string, dir: string): Promise<DownloadedAttachment[]>
   createThread(parent_channel_id: string, name: string): Promise<ThreadInfo>
+  archiveThread(thread_id: string): Promise<void>
   verifyThreadParent(thread_id: string): Promise<string | null>
   postPermissionPrompt(chat_id: string, request_id: string, tool_name: string): Promise<void>
   postPermissionPromptDM(allowFrom: string[], request_id: string, tool_name: string): Promise<void>
@@ -90,6 +91,17 @@ export class FakeDiscordOps implements DiscordOps {
     this.calls.push({ kind: 'createThread', parent_channel_id, name, thread_id })
     return { thread_id, thread_name: name }
   }
+  private archivedThreads = new Set<string>()
+
+  async archiveThread(thread_id: string) {
+    this.calls.push({ kind: 'archiveThread', thread_id })
+    this.archivedThreads.add(thread_id)
+  }
+
+  isArchived(thread_id: string): boolean {
+    return this.archivedThreads.has(thread_id)
+  }
+
   async verifyThreadParent(thread_id: string) {
     return this.threadParents.get(thread_id) ?? null
   }

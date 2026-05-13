@@ -13,6 +13,12 @@ export type BindingEntry = {
    * doubles as the "this entry has not been migrated yet" marker.
    */
   canonical_cwd?: string
+  /** Set iff the binding was authored via create_thread MCP tool. */
+  managed?: true
+  /** tmux session name (e.g. "claude-<sid>") when a child claude is live. Cleared by reconcile when tmux is gone. */
+  tmux_session?: string
+  /** Free-form disambiguator passed to create_thread; folded into session_id when present. */
+  label?: string
 }
 
 export type Bindings = Record<string, BindingEntry>
@@ -96,6 +102,20 @@ export function upsertBinding(file: string, sessionId: string, entry: BindingEnt
   return enqueue(file, () => {
     const current = loadBindings(file)
     current[sessionId] = snapshot
+    writeAtomic(file, JSON.stringify(current, null, 2) + '\n')
+  })
+}
+
+/**
+ * Delete a single binding entry, preserving everything else on disk.
+ * Mirrors upsertBinding's queued load-merge-write under the per-file mutex.
+ * No-op if the entry does not exist.
+ */
+export function removeBinding(file: string, sessionId: string): Promise<void> {
+  return enqueue(file, () => {
+    const current = loadBindings(file)
+    if (!(sessionId in current)) return
+    delete current[sessionId]
     writeAtomic(file, JSON.stringify(current, null, 2) + '\n')
   })
 }
