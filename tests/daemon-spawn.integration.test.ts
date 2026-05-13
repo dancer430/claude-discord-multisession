@@ -200,3 +200,91 @@ describe('daemon: create_thread happy path', () => {
     expect(payload.session_id).toBe(childSid)
   })
 })
+
+describe('daemon: close_thread', () => {
+  async function seedManaged(opts: {
+    sessionId: string
+    threadId: string
+    cwd: string
+    tmuxSession: string
+  }) {
+    writeFileSync(join(dir, 'bindings.json'), JSON.stringify({
+      [opts.sessionId]: {
+        thread_id: opts.threadId,
+        cwd: opts.cwd,
+        created_at: 1,
+        last_seen_at: 2,
+        managed: true,
+        tmux_session: opts.tmuxSession,
+      },
+    }))
+  }
+
+  test('close by thread_id kills tmux, archives thread, removes binding', async () => {
+    const ops = new FakeDiscordOps()
+    const tmuxRunner = new FakeTmuxRunner()
+    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+    const sockPath = join(dir, 'daemon.sock')
+    const mgr = await registerDm(sockPath, 'mgr-c1')
+
+    const sessionId = 'sid-close-1'
+    await seedManaged({ sessionId, threadId: 't-1', cwd: '/tmp', tmuxSession: 'claude-' + sessionId })
+
+    tmuxRunner.scriptExit(0)  // kill-session ok
+    writeFrame(mgr.sock, { type: 'tool_call', id: 2, name: 'close_thread', args: { thread_id: 't-1' } })
+    const result = await recv(mgr.it)
+    expect(result.isError).toBeFalsy()
+    expect(JSON.parse(result.content[0].text)).toEqual({ closed: 't-1' })
+
+    expect(ops.isArchived('t-1')).toBe(true)
+    expect(loadBindings(join(dir, 'bindings.json'))).toEqual({})
+    expect(tmuxRunner.calls.some(c => c[0] === 'kill-session' && c[2] === 'claude-' + sessionId)).toBe(true)
+  })
+
+  test('close by cwd resolves via computeSessionId', async () => {
+    const ops = new FakeDiscordOps()
+    const tmuxRunner = new FakeTmuxRunner()
+    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+    const sockPath = join(dir, 'daemon.sock')
+    const mgr = await registerDm(sockPath, 'mgr-c2')
+
+    const cwd = '/tmp'
+    const { sessionId } = computeSessionId(cwd)
+    await seedManaged({ sessionId, threadId: 't-2', cwd, tmuxSession: tmuxSessionName(sessionId) })
+
+    tmuxRunner.scriptExit(0)
+    writeFrame(mgr.sock, { type: 'tool_call', id: 2, name: 'close_thread', args: { cwd } })
+    const result = await recv(mgr.it)
+    expect(result.isError).toBeFalsy()
+    expect(ops.isArchived('t-2')).toBe(true)
+  })
+
+  test('close refuses non-managed bindings', async () => {
+    const ops = new FakeDiscordOps()
+    const tmuxRunner = new FakeTmuxRunner()
+    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+    const sockPath = join(dir, 'daemon.sock')
+    const mgr = await registerDm(sockPath, 'mgr-c3')
+
+    writeFileSync(join(dir, 'bindings.json'), JSON.stringify({
+      'sid-manual': { thread_id: 't-manual', cwd: '/tmp', created_at: 1, last_seen_at: 2 },
+    }))
+    writeFrame(mgr.sock, { type: 'tool_call', id: 2, name: 'close_thread', args: { thread_id: 't-manual' } })
+    const result = await recv(mgr.it)
+    expect(result.isError).toBe(true)
+    expect(JSON.parse(result.content[0].text).error).toBe('close_thread_unmanaged')
+  })
+
+  test('close not_found when target missing', async () => {
+    const ops = new FakeDiscordOps()
+    const tmuxRunner = new FakeTmuxRunner()
+    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+    const sockPath = join(dir, 'daemon.sock')
+    const mgr = await registerDm(sockPath, 'mgr-c4')
+
+    writeFrame(mgr.sock, { type: 'tool_call', id: 2, name: 'close_thread', args: { thread_id: 't-ghost' } })
+    const result = await recv(mgr.it)
+    expect(result.isError).toBe(true)
+    expect(JSON.parse(result.content[0].text).error).toBe('close_thread_not_found')
+  })
+})

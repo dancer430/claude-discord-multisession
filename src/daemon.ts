@@ -489,6 +489,7 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
         case 'create_thread':
           return await handleCreateThread(args)
         case 'close_thread':
+          return await handleCloseThread(args)
         case 'list_threads':
           return {
             content: [{ type: 'text', text: JSON.stringify({ error: 'not_implemented', tool: name }) }],
@@ -582,6 +583,49 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
       cwd,
       label,
     })
+  }
+
+  async function handleCloseThread(args: Record<string, unknown>): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
+    const { computeSessionId, killSpawn } = await import('./spawn-manager')
+    const { removeBinding } = await import('./bindings')
+
+    const threadIdArg = args.thread_id !== undefined ? String(args.thread_id) : undefined
+    const cwdArg = args.cwd !== undefined ? String(args.cwd) : undefined
+    const labelArg = args.label !== undefined ? String(args.label) : undefined
+
+    const bindings = loadBindings(bindingsFile)
+    let sessionId: string | undefined
+    let entry: typeof bindings[string] | undefined
+
+    if (threadIdArg) {
+      for (const [k, v] of Object.entries(bindings)) {
+        if (v.thread_id === threadIdArg) { sessionId = k; entry = v; break }
+      }
+    } else if (cwdArg) {
+      const computed = computeSessionId(cwdArg, labelArg).sessionId
+      sessionId = computed
+      entry = bindings[computed]
+    } else {
+      return errText('close_thread_not_found', 'must pass thread_id or cwd')
+    }
+
+    if (!entry) return errText('close_thread_not_found', 'no binding matches the target')
+    if (!entry.managed) return errText('close_thread_unmanaged', 'binding is not managed; cannot close via close_thread')
+
+    if (entry.tmux_session) {
+      await killSpawn(tmuxRunner, entry.tmux_session)
+    }
+    try {
+      await ops.archiveThread(entry.thread_id)
+    } catch (e) {
+      process.stderr.write(`close_thread: archiveThread failed for ${entry.thread_id}: ${String((e as Error).message)}\n`)
+    }
+    await removeBinding(bindingsFile, sessionId!)
+
+    threadIndex.delete(entry.thread_id)
+    sessions.delete(sessionId!)
+
+    return okJson({ closed: entry.thread_id })
   }
 
   function errText(code: string, message: string) {
