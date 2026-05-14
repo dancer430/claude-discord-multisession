@@ -209,7 +209,7 @@ describe('spawnClaude', () => {
     return fn
   }
 
-  test('spawns with cwd, env additions, detached, stdio fd', () => {
+  test('wraps in tmux with cwd, inlined env, detached, stdio fd', () => {
     const spawnStub = makeSpawnStub()
     const openSyncStub = makeOpenSync(11)
     const r = spawnClaude({
@@ -224,20 +224,27 @@ describe('spawnClaude', () => {
     expect(r).toEqual({ ok: true, pid: 12345 })
     expect(spawnStub.calls).toHaveLength(1)
     const call = spawnStub.calls[0]
-    expect(call.cmd).toBe('claude')
-    expect(call.args).toEqual(['--channels', 'plugin:discord@dancer430-discord'])
+    expect(call.cmd).toBe('tmux')
+    // ['new-session', '-d', '-s', <name>, <shell-command>]
+    expect(call.args.slice(0, 3)).toEqual(['new-session', '-d', '-s'])
+    expect(call.args[3]).toMatch(/^claude-spawn-/)
+    const shellCmd = call.args[4]
+    expect(shellCmd).toContain(`cd '/root/sub'`)
+    expect(shellCmd).toContain('DISCORD_THREAD_ID=auto')
+    expect(shellCmd).toContain(`DISCORD_THREAD_NAME='sub'`)
+    expect(shellCmd).toContain(`'claude' '--channels' 'plugin:discord@dancer430-discord'`)
     expect(call.opts.cwd).toBe('/root/sub')
     expect(call.opts.detached).toBe(true)
     expect(call.opts.stdio).toEqual(['ignore', 11, 11])
-    expect(call.opts.env.DISCORD_THREAD_ID).toBe('auto')
-    expect(call.opts.env.DISCORD_THREAD_NAME).toBe('sub')
+    // Env is passed to tmux unmodified — thread vars are inlined into the
+    // shell command above instead, so tmux's env-capture quirks don't leak.
     expect(call.opts.env.HTTPS_PROXY).toBe('http://proxy:8080')
     expect(call.opts.env.PATH).toBe('/bin')
     expect(openSyncStub.calls[0].path).toBe('/tmp/spawned-abc.log')
     expect((spawnStub as any).unrefed).toBe(true)
   })
 
-  test('caller-supplied env entries do NOT override DISCORD_THREAD_ID / NAME', () => {
+  test('inlined thread vars take precedence over caller-supplied env entries', () => {
     const spawnStub = makeSpawnStub()
     const r = spawnClaude({
       cwd: '/root/sub', threadName: 'sub',
@@ -247,8 +254,16 @@ describe('spawnClaude', () => {
       spawn: spawnStub, openSync: makeOpenSync(),
     })
     expect(r.ok).toBe(true)
-    expect(spawnStub.calls[0].opts.env.DISCORD_THREAD_ID).toBe('auto')
-    expect(spawnStub.calls[0].opts.env.DISCORD_THREAD_NAME).toBe('sub')
+    // Caller's env is passed through to tmux as-is (an attacker can't reach
+    // the inner shell that way — tmux server captures env on first launch,
+    // not per-session). The inlined `VAR=value` prefixes in the shell command
+    // are what the spawned claude actually sees, and they take precedence.
+    const shellCmd = spawnStub.calls[0].args[4]
+    expect(shellCmd).toContain('DISCORD_THREAD_ID=auto')
+    expect(shellCmd).toContain(`DISCORD_THREAD_NAME='sub'`)
+    // The inlined prefixes appear AFTER `cd ... &&` and BEFORE the claude
+    // invocation — so they override whatever's in the calling env.
+    expect(shellCmd).toMatch(/&& DISCORD_THREAD_ID=auto DISCORD_THREAD_NAME='sub' 'claude'/)
   })
 
   test('returns spawn_failed when spawn throws ENOENT', () => {

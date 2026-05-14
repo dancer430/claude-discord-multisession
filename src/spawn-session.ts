@@ -120,15 +120,28 @@ export type SpawnOk = { ok: true; pid: number }
 export type SpawnErr = { ok: false; code: 'spawn_failed'; message: string }
 export type SpawnResult = SpawnOk | SpawnErr
 
+function shellEscape(s: string): string {
+  return "'" + s.replace(/'/g, `'\\''`) + "'"
+}
+
 /**
- * Detached-spawns `claude` (or whatever `command[0]` resolves to) with cwd
- * set, with logs appended to `logPath`, and with `DISCORD_THREAD_ID=auto`
- * + `DISCORD_THREAD_NAME=<threadName>` forced in env. The daemon's idle-exit
- * does not have to wait for the child (`.unref()`).
+ * Spawns `claude` inside a detached `tmux new-session -d`. The tmux wrap
+ * gives claude a PTY; without one, claude 2.x infers `--print` from a
+ * non-TTY stdout and exits with "Input must be provided either through
+ * stdin or as a prompt argument when using --print" before it can
+ * register with the daemon — see the audit note on this branch.
  *
- * Env composition order: caller's `env` first, then our two thread vars on
- * top — so a hostile caller cannot smuggle a different thread id/name in
- * via `env`.
+ * Env handling: `DISCORD_THREAD_ID=auto` and `DISCORD_THREAD_NAME=<name>`
+ * are INLINED into the shell command tmux runs, NOT passed via `env`.
+ * That keeps the property that a hostile caller's `env` cannot smuggle a
+ * different thread id/name in even if tmux's environment passthrough is
+ * unexpected (tmux server captures env from its first invocation only).
+ *
+ * Logs: `tmux new-session -d` daemonizes immediately, so the `logPath` fd
+ * only captures tmux's own startup output. The child claude's stdout/stderr
+ * live inside the tmux session; attach with `tmux attach -t claude-spawn-…`
+ * to inspect. The audit trail in `daemon.log` (`register outcome=...`) is
+ * the load-bearing signal for whether the child came up.
  */
 export function spawnClaude(args: {
   cwd: string
@@ -145,18 +158,28 @@ export function spawnClaude(args: {
   } catch (err) {
     return { ok: false, code: 'spawn_failed', message: `open ${args.logPath} failed: ${(err as Error).message}` }
   }
-  const finalEnv = {
-    ...args.env,
-    DISCORD_THREAD_ID: 'auto',
-    DISCORD_THREAD_NAME: args.threadName,
-  }
   try {
-    const child = args.spawn(args.command[0]!, args.command.slice(1), {
-      cwd: args.cwd,
-      env: finalEnv,
-      detached: true,
-      stdio: ['ignore', fd, fd],
-    })
+    const tmuxSessionName = `claude-spawn-${randomShortId()}`
+    const prefixes = [
+      'DISCORD_THREAD_ID=auto',
+      `DISCORD_THREAD_NAME=${shellEscape(args.threadName)}`,
+    ]
+    const claudeBin = shellEscape(args.command[0]!)
+    const claudeArgsTail = args.command.length > 1
+      ? ' ' + args.command.slice(1).map(shellEscape).join(' ')
+      : ''
+    const launch = `${prefixes.join(' ')} ${claudeBin}${claudeArgsTail}`
+    const shellCommand = `cd ${shellEscape(args.cwd)} && ${launch}`
+    const child = args.spawn(
+      'tmux',
+      ['new-session', '-d', '-s', tmuxSessionName, shellCommand],
+      {
+        cwd: args.cwd,
+        env: args.env,
+        detached: true,
+        stdio: ['ignore', fd, fd],
+      },
+    )
     child.unref()
     try { closeSync(fd) } catch {}
     return { ok: true, pid: child.pid ?? -1 }
