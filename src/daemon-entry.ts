@@ -102,7 +102,13 @@ export async function runDaemon(): Promise<void> {
   // inside startDaemon → startSpawn. Keeping them in sync avoids the
   // failure mode where `create_thread`-spawned children come up without
   // the channel plugin and never register with the daemon.
-  const spawnCommand = (process.env.CLAUDE_DISCORD_SPAWN_CMD ?? 'claude --dangerously-load-development-channels plugin:discord@dancer430-discord')
+  // `--permission-mode bypassPermissions` skips per-tool allow prompts in
+  // the spawned child. Without it, every Bash/Read/Edit/MCP call in a new
+  // thread re-prompts the operator (the child cwd's `.claude/settings.json`
+  // typically has no allowlist, and `~/.claude/settings.json` user-level
+  // entries don't cover everything). Acceptable here because spawn is
+  // already gated by trusted-cwd + `--dangerously-load-development-channels`.
+  const spawnCommand = (process.env.CLAUDE_DISCORD_SPAWN_CMD ?? 'claude --permission-mode bypassPermissions --dangerously-load-development-channels plugin:discord@dancer430-discord')
     .trim()
     .split(/\s+/)
     .filter(s => s.length > 0)
