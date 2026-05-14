@@ -1,6 +1,8 @@
 import { spawn } from 'child_process'
 import { createHash } from 'crypto'
-import { realpathSync } from 'fs'
+import { realpathSync, promises as fsp } from 'fs'
+import { homedir } from 'os'
+import { join as pathJoin } from 'path'
 import { deriveSessionId, deriveThreadName } from './session-id'
 
 export type TmuxResult = { exitCode: number; stdout: string; stderr: string }
@@ -117,6 +119,125 @@ export interface SpawnInput {
   label?: string
   threadNameOverride?: string
   claudePath: string
+  /**
+   * Override the user-config path used by ensureCwdTrusted and
+   * ensureMcpJsonServersEnabled (tests).
+   */
+  claudeConfigPath?: string
+}
+
+/**
+ * Pre-write `projects[cwd].hasTrustDialogAccepted = true` into the user's
+ * claude config so the spawned child skips the interactive workspace-trust
+ * dialog. Without this, claude blocks on the prompt before loading any
+ * MCP, so the discord plugin never registers and the daemon eventually
+ * returns `create_thread_register_timeout` with nothing visible in the
+ * log — see `project_create_thread_trust_dialog_block.md`.
+ *
+ * Safe to call repeatedly for the same cwd; no-ops when already trusted.
+ * Atomic temp+rename keeps concurrent claude processes from observing a
+ * half-written file; the file write is not locked, so a racing writer
+ * during the read→write window can clobber an unrelated update — same
+ * risk model as any other claude process touching `~/.claude.json`.
+ */
+export async function ensureCwdTrusted(cwd: string, configPath?: string): Promise<void> {
+  const file = configPath ?? pathJoin(homedir(), '.claude.json')
+  let parsed: Record<string, any>
+  try {
+    parsed = JSON.parse(await fsp.readFile(file, 'utf8'))
+  } catch (e: any) {
+    if (e?.code !== 'ENOENT') throw e
+    parsed = {}
+  }
+  const projects = (parsed.projects ??= {})
+  const existing = projects[cwd]
+  if (existing && existing.hasTrustDialogAccepted === true) return
+  projects[cwd] = {
+    allowedTools: [],
+    mcpContextUris: [],
+    mcpServers: {},
+    enabledMcpjsonServers: [],
+    disabledMcpjsonServers: [],
+    hasClaudeMdExternalIncludesApproved: false,
+    hasClaudeMdExternalIncludesWarningShown: false,
+    projectOnboardingSeenCount: 0,
+    ...(existing ?? {}),
+    hasTrustDialogAccepted: true,
+  }
+  const tmp = `${file}.spawn-trust.${process.pid}.${Date.now()}.tmp`
+  await fsp.writeFile(tmp, JSON.stringify(parsed, null, 2))
+  await fsp.rename(tmp, file)
+}
+
+/**
+ * Pre-approve every MCP server declared in `<cwd>/.mcp.json` so the
+ * spawned child claude skips the "New MCP server found in .mcp.json"
+ * interactive prompt. That prompt sits in front of MCP load, so without
+ * this the discord plugin never registers and the daemon eventually
+ * returns `create_thread_register_timeout` with nothing visible in the
+ * log — same failure mode as the trust dialog (see ensureCwdTrusted).
+ *
+ * No-op when `<cwd>/.mcp.json` is missing or declares no `mcpServers`.
+ * When entries are missing from `projects[cwd].enabledMcpjsonServers`,
+ * the function unions them in AND removes any matching name from
+ * `disabledMcpjsonServers` (a previous "no thanks" answer would
+ * otherwise keep the server disabled even after we add it to the
+ * enabled list). Safe to call repeatedly; only writes when something
+ * actually changes. Atomic temp+rename, same race-window caveat as
+ * ensureCwdTrusted.
+ */
+export async function ensureMcpJsonServersEnabled(cwd: string, configPath?: string): Promise<void> {
+  const mcpFile = pathJoin(cwd, '.mcp.json')
+  let mcpDoc: { mcpServers?: Record<string, unknown> } | null
+  try {
+    mcpDoc = JSON.parse(await fsp.readFile(mcpFile, 'utf8'))
+  } catch (e: any) {
+    if (e?.code === 'ENOENT') return
+    throw e
+  }
+  const names = Object.keys(mcpDoc?.mcpServers ?? {})
+  if (names.length === 0) return
+
+  const file = configPath ?? pathJoin(homedir(), '.claude.json')
+  let parsed: Record<string, any>
+  try {
+    parsed = JSON.parse(await fsp.readFile(file, 'utf8'))
+  } catch (e: any) {
+    if (e?.code !== 'ENOENT') throw e
+    parsed = {}
+  }
+  const projects = (parsed.projects ??= {})
+  const existing = projects[cwd]
+  const currentEnabled: string[] = Array.isArray(existing?.enabledMcpjsonServers)
+    ? existing.enabledMcpjsonServers
+    : []
+  const currentDisabled: string[] = Array.isArray(existing?.disabledMcpjsonServers)
+    ? existing.disabledMcpjsonServers
+    : []
+  const nextEnabled = new Set<string>(currentEnabled)
+  const nextDisabled = new Set<string>(currentDisabled)
+  let changed = false
+  for (const n of names) {
+    if (!nextEnabled.has(n)) { nextEnabled.add(n); changed = true }
+    if (nextDisabled.delete(n)) changed = true
+  }
+  if (!changed) return
+  projects[cwd] = {
+    allowedTools: [],
+    mcpContextUris: [],
+    mcpServers: {},
+    enabledMcpjsonServers: [],
+    disabledMcpjsonServers: [],
+    hasClaudeMdExternalIncludesApproved: false,
+    hasClaudeMdExternalIncludesWarningShown: false,
+    projectOnboardingSeenCount: 0,
+    ...(existing ?? {}),
+    enabledMcpjsonServers: [...nextEnabled],
+    disabledMcpjsonServers: [...nextDisabled],
+  }
+  const tmp = `${file}.spawn-mcp.${process.pid}.${Date.now()}.tmp`
+  await fsp.writeFile(tmp, JSON.stringify(parsed, null, 2))
+  await fsp.rename(tmp, file)
 }
 
 /**
@@ -125,9 +246,19 @@ export interface SpawnInput {
  * before invoking tmux if cwd contains shell-unsafe characters.
  */
 export async function startSpawn(input: SpawnInput): Promise<string> {
-  const { runner, sessionId, cwd, label, threadNameOverride, claudePath } = input
+  const { runner, sessionId, cwd, label, threadNameOverride, claudePath, claudeConfigPath } = input
   if (!SAFE_CWD.test(cwd)) {
     throw new Error(`invalid cwd: contains characters outside [A-Za-z0-9 _.-/]`)
+  }
+  try {
+    await ensureCwdTrusted(cwd, claudeConfigPath)
+  } catch (e) {
+    process.stderr.write(`spawn-manager: ensureCwdTrusted(${cwd}) failed: ${(e as Error).message}\n`)
+  }
+  try {
+    await ensureMcpJsonServersEnabled(cwd, claudeConfigPath)
+  } catch (e) {
+    process.stderr.write(`spawn-manager: ensureMcpJsonServersEnabled(${cwd}) failed: ${(e as Error).message}\n`)
   }
   const name = tmuxSessionName(sessionId)
   const exports: string[] = [

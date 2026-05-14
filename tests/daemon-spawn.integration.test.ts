@@ -64,7 +64,7 @@ describe('daemon: create_thread happy path', () => {
     const ops = new FakeDiscordOps()
     const tmuxRunner = new FakeTmuxRunner()
     tmuxRunner.scriptExit(0)  // tmux new-session
-    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner, claudeConfigPath: join(dir, 'fake-claude.json') })
     const sockPath = join(dir, 'daemon.sock')
 
     const mgr = await registerDm(sockPath, 'mgr-session')
@@ -100,7 +100,7 @@ describe('daemon: create_thread happy path', () => {
     }))
     const ops = new FakeDiscordOps()
     const tmuxRunner = new FakeTmuxRunner()
-    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner, claudeConfigPath: join(dir, 'fake-claude.json') })
     const sockPath = join(dir, 'daemon.sock')
     const mgr = await registerDm(sockPath, 'mgr-2')
 
@@ -115,7 +115,7 @@ describe('daemon: create_thread happy path', () => {
     const ops = new FakeDiscordOps()
     const tmuxRunner = new FakeTmuxRunner()
     tmuxRunner.scriptExit(1, '', 'tmux: unable to start')
-    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner, claudeConfigPath: join(dir, 'fake-claude.json') })
     const sockPath = join(dir, 'daemon.sock')
     const mgr = await registerDm(sockPath, 'mgr-3')
 
@@ -131,7 +131,7 @@ describe('daemon: create_thread happy path', () => {
   test('rejects when binding already exists and tmux alive (already_running)', async () => {
     const ops = new FakeDiscordOps()
     const tmuxRunner = new FakeTmuxRunner()
-    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner, claudeConfigPath: join(dir, 'fake-claude.json') })
     const sockPath = join(dir, 'daemon.sock')
     const mgr = await registerDm(sockPath, 'mgr-4')
 
@@ -152,7 +152,7 @@ describe('daemon: create_thread happy path', () => {
     const ops = new FakeDiscordOps()
     const tmuxRunner = new FakeTmuxRunner()
     tmuxRunner.scriptExit(0)  // first create_thread's tmux ok
-    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner, claudeConfigPath: join(dir, 'fake-claude.json') })
     const sockPath = join(dir, 'daemon.sock')
 
     // The DM session acts as the first manager.
@@ -224,7 +224,7 @@ describe('daemon: close_thread', () => {
   test('close by thread_id kills tmux, archives thread, removes binding', async () => {
     const ops = new FakeDiscordOps()
     const tmuxRunner = new FakeTmuxRunner()
-    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner, claudeConfigPath: join(dir, 'fake-claude.json') })
     const sockPath = join(dir, 'daemon.sock')
     const mgr = await registerDm(sockPath, 'mgr-c1')
 
@@ -245,7 +245,7 @@ describe('daemon: close_thread', () => {
   test('close by cwd resolves via computeSessionId', async () => {
     const ops = new FakeDiscordOps()
     const tmuxRunner = new FakeTmuxRunner()
-    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner, claudeConfigPath: join(dir, 'fake-claude.json') })
     const sockPath = join(dir, 'daemon.sock')
     const mgr = await registerDm(sockPath, 'mgr-c2')
 
@@ -263,7 +263,7 @@ describe('daemon: close_thread', () => {
   test('close refuses non-managed bindings', async () => {
     const ops = new FakeDiscordOps()
     const tmuxRunner = new FakeTmuxRunner()
-    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner, claudeConfigPath: join(dir, 'fake-claude.json') })
     const sockPath = join(dir, 'daemon.sock')
     const mgr = await registerDm(sockPath, 'mgr-c3')
 
@@ -279,7 +279,7 @@ describe('daemon: close_thread', () => {
   test('close not_found when target missing', async () => {
     const ops = new FakeDiscordOps()
     const tmuxRunner = new FakeTmuxRunner()
-    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner, claudeConfigPath: join(dir, 'fake-claude.json') })
     const sockPath = join(dir, 'daemon.sock')
     const mgr = await registerDm(sockPath, 'mgr-c4')
 
@@ -294,7 +294,7 @@ describe('daemon: list_threads', () => {
   test('lists only managed bindings with tmux_alive decoration', async () => {
     const ops = new FakeDiscordOps()
     const tmuxRunner = new FakeTmuxRunner()
-    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner, claudeConfigPath: join(dir, 'fake-claude.json') })
     const sockPath = join(dir, 'daemon.sock')
     const mgr = await registerDm(sockPath, 'mgr-l1')
 
@@ -404,7 +404,7 @@ describe('daemon: list_project_dirs', () => {
 
       const ops = new FakeDiscordOps()
       const tmuxRunner = new FakeTmuxRunner()
-      daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+      daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner, claudeConfigPath: join(dir, 'fake-claude.json') })
       const sockPath = join(dir, 'daemon.sock')
       const mgr = await registerDm(sockPath, 'mgr-list-1')
 
@@ -431,7 +431,7 @@ describe('daemon: list_project_dirs', () => {
 
     const ops = new FakeDiscordOps()
     const tmuxRunner = new FakeTmuxRunner()
-    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner, claudeConfigPath: join(dir, 'fake-claude.json') })
     const sockPath = join(dir, 'daemon.sock')
     const mgr = await registerDm(sockPath, 'mgr-list-2')
 
@@ -455,7 +455,7 @@ describe('daemon: create_thread cwd guard', () => {
 
       const ops = new FakeDiscordOps()
       const tmuxRunner = new FakeTmuxRunner()
-      daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+      daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner, claudeConfigPath: join(dir, 'fake-claude.json') })
       const sockPath = join(dir, 'daemon.sock')
       const mgr = await registerDm(sockPath, 'mgr-guard-1')
 
@@ -485,7 +485,7 @@ describe('daemon: create_thread cwd guard', () => {
 
       const ops = new FakeDiscordOps()
       const tmuxRunner = new FakeTmuxRunner()
-      daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+      daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner, claudeConfigPath: join(dir, 'fake-claude.json') })
       const sockPath = join(dir, 'daemon.sock')
       const mgr = await registerDm(sockPath, 'mgr-guard-2')
 
@@ -517,7 +517,7 @@ describe('daemon: create_thread cwd guard', () => {
       const ops = new FakeDiscordOps()
       const tmuxRunner = new FakeTmuxRunner()
       tmuxRunner.scriptExit(0)
-      daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+      daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner, claudeConfigPath: join(dir, 'fake-claude.json') })
       const sockPath = join(dir, 'daemon.sock')
       const mgr = await registerDm(sockPath, 'mgr-guard-3')
 
