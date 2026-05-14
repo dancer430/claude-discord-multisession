@@ -215,7 +215,7 @@ describe('spawnClaude', () => {
     const r = spawnClaude({
       cwd: '/root/sub',
       threadName: 'sub',
-      command: ['claude', '--channels', 'plugin:discord@danielfbm-discord'],
+      command: ['claude', '--channels', 'plugin:discord@dancer430-discord'],
       env: { PATH: '/bin', HTTPS_PROXY: 'http://proxy:8080' },
       logPath: '/tmp/spawned-abc.log',
       spawn: spawnStub,
@@ -225,7 +225,7 @@ describe('spawnClaude', () => {
     expect(spawnStub.calls).toHaveLength(1)
     const call = spawnStub.calls[0]
     expect(call.cmd).toBe('claude')
-    expect(call.args).toEqual(['--channels', 'plugin:discord@danielfbm-discord'])
+    expect(call.args).toEqual(['--channels', 'plugin:discord@dancer430-discord'])
     expect(call.opts.cwd).toBe('/root/sub')
     expect(call.opts.detached).toBe(true)
     expect(call.opts.stdio).toEqual(['ignore', 11, 11])

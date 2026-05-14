@@ -36,7 +36,7 @@ Single-host only by design; multi-machine is out of scope.
   a local marketplace rather than `claude-plugins-official`).
 
 ```sh
-git clone git@github.com:danielfbm/claude-discord-multisession.git
+git clone git@github.com:dancer430/claude-discord-multisession.git
 cd claude-discord-multisession
 bun install
 ```
@@ -84,7 +84,7 @@ Inside a CC session:
 
 ```
 /plugin marketplace add /absolute/path/to/claude-discord-multisession
-/plugin install discord@danielfbm-discord
+/plugin install discord@dancer430-discord
 ```
 
 **4. Save the bot token.**
@@ -111,7 +111,7 @@ This fork lives in a custom marketplace, so it isn't on Anthropic's
 managed channel allowlist. Use the development flag:
 
 ```sh
-claude --dangerously-load-development-channels plugin:discord@danielfbm-discord
+claude --dangerously-load-development-channels plugin:discord@dancer430-discord
 ```
 
 The flag opts you into running an unapproved channel source. Standard
@@ -168,7 +168,7 @@ thread messages pass the access gate.
 ```sh
 cd ~/some/project
 DISCORD_THREAD_ID=auto \
-  claude --dangerously-load-development-channels plugin:discord@danielfbm-discord
+  claude --dangerously-load-development-channels plugin:discord@dancer430-discord
 ```
 
 The bot creates a thread named `<cwd-basename>` (e.g. `project`) and binds
@@ -187,7 +187,7 @@ Override the default basename naming with an env var:
 
 ```sh
 DISCORD_THREAD_ID=auto DISCORD_THREAD_NAME='Sprint 42 refactor' \
-  claude --dangerously-load-development-channels plugin:discord@danielfbm-discord
+  claude --dangerously-load-development-channels plugin:discord@dancer430-discord
 ```
 
 The name is sanitized to word/space/`.`/`-` characters, trimmed, and capped
@@ -202,7 +202,7 @@ If you've already created a thread by hand and want CC to bind to it:
 ```sh
 # Get the thread ID: right-click the thread → Copy Thread ID
 DISCORD_THREAD_ID=1502195236900966400 \
-  claude --dangerously-load-development-channels plugin:discord@danielfbm-discord
+  claude --dangerously-load-development-channels plugin:discord@dancer430-discord
 ```
 
 The thread's parent channel must be opted into `groups` (step 2 of
@@ -397,7 +397,7 @@ to `$DISCORD_STATE_DIR`, then `$CLAUDE_CONFIG_DIR/channels/discord`, then
 | `discord daemon: DISCORD_BOT_TOKEN required\n  set in <path>/.env` | `.env` is in a different dir than the daemon resolves to. | Check `$CLAUDE_CONFIG_DIR` / `$DISCORD_STATE_DIR`; place `.env` in the dir the daemon actually points at (the path printed in the error). |
 | `discord shim: register failed (parent_channel_unset)` | Launched with `DISCORD_THREAD_ID=auto` but `parentChannelId` is unset. | `/discord:configure parent <channelId>` first, then relaunch. |
 | `discord daemon: login failed: Error [TokenInvalid]` | Token is malformed or revoked. | Developer Portal → Bot → Reset Token, then `/discord:configure <new-token>`. |
-| MCP disconnects after working briefly, no clear error | Multiple daemons racing for the socket (resolved in 0.0.6). | `/plugin update discord@danielfbm-discord`, kill stray `bun ... server.ts --daemon` processes, restart Claude Code. |
+| MCP disconnects after working briefly, no clear error | Multiple daemons racing for the socket (resolved in 0.0.6). | `/plugin update discord@dancer430-discord`, kill stray `bun ... server.ts --daemon` processes, restart Claude Code. |
 | Tool returns `isError`: `reply requires field 'text' (string); got keys [chat_id, content, message_id]. did you mean 'text' instead of 'content'?` | The assistant called a Discord tool with the wrong field names — usually `content`/`message_id` leaking in from `react`/`edit_message`. Prior to validation this silently sent the 9-byte string "undefined" to the channel. | No operator action needed — the assistant should retry with the correct field names. If it keeps failing, check the LLM's tool input in the session jsonl. |
 
 If `daemon.log` is empty, the daemon never spawned — verify `bun` is on
@@ -433,7 +433,7 @@ An authorized user can post `起子区 /abs/path` in the configured parent chann
 
 **Environment overrides:**
 
-- `CLAUDE_DISCORD_SPAWN_CMD` — overrides the spawn argv. Whitespace-split. Default: `claude --channels plugin:discord@danielfbm-discord`. Use this on dev installs (`claude --dangerously-load-development-channels …`) or to wrap in `tmux` if your `claude` binary requires a TTY.
+- `CLAUDE_DISCORD_SPAWN_CMD` — overrides the spawn argv. Whitespace-split. Default: `claude --channels plugin:discord@dancer430-discord`. Use this on dev installs (`claude --dangerously-load-development-channels …`) or to wrap in `tmux` if your `claude` binary requires a TTY.
 
 **Security:**
 

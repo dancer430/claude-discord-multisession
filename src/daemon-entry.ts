@@ -91,7 +91,7 @@ export async function runDaemon(): Promise<void> {
   // Operator can override the full `claude` invocation via env. Default
   // matches the README's plugin-install form. Shell-split is intentionally
   // naive (whitespace-only) — operators who need quoting should pre-split.
-  const spawnCommand = (process.env.CLAUDE_DISCORD_SPAWN_CMD ?? 'claude --channels plugin:discord@danielfbm-discord')
+  const spawnCommand = (process.env.CLAUDE_DISCORD_SPAWN_CMD ?? 'claude --channels plugin:discord@dancer430-discord')
     .trim()
     .split(/\s+/)
     .filter(s => s.length > 0)
