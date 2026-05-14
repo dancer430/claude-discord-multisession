@@ -433,7 +433,7 @@ An authorized user can post `起子区 /abs/path` in the configured parent chann
 
 **Environment overrides:**
 
-- `CLAUDE_DISCORD_SPAWN_CMD` — overrides the spawn argv. Whitespace-split. Default: `claude --channels plugin:discord@dancer430-discord`. Use this on dev installs (`claude --dangerously-load-development-channels …`) or to wrap in `tmux` if your `claude` binary requires a TTY.
+- `CLAUDE_DISCORD_SPAWN_CMD` — overrides the spawn argv. Whitespace-split. Default: `claude --dangerously-load-development-channels plugin:discord@dancer430-discord`. The default uses the dev-install flag because `plugin:discord@dancer430-discord` is not on Claude Code's approved-channels allowlist; `--channels` silently ignores MCP notifications from unapproved sources, so a spawned child would register with the daemon but never see inbound messages. Override this only if you're shipping a different plugin id that *is* on the allowlist, or to wrap in `tmux` for a TTY-requiring `claude` binary.
 
   This same argv drives **both** spawn paths — the parent-channel `起子区` trigger AND the `create_thread` MCP tool (see below). The first whitespace-split token is the binary; the rest are forwarded verbatim as args. If you set `CLAUDE_DISCORD_SPAWN_CMD=/usr/bin/claude --channels plugin:foo`, every spawned child gets `/usr/bin/claude --channels plugin:foo …` in its tmux command.
 
@@ -470,7 +470,7 @@ cd '<cwd>' && \
   '<claudePath>' '<claudeArgs[0]>' '<claudeArgs[1]>' …
 ```
 
-`claudePath` + `claudeArgs` come from the **same** `CLAUDE_DISCORD_SPAWN_CMD` env var documented above. If you launched the daemon with `CLAUDE_DISCORD_SPAWN_CMD="claude --channels plugin:discord@dancer430-discord"`, every `create_thread`-spawned child also gets that flag — which is what makes the MCP discord plugin load in the child, and thus what makes it `register` with the daemon over the IPC socket. Without that flag (or its `--dangerously-load-development-channels` cousin for dev installs), the child comes up at the welcome prompt with no plugin loaded, never registers, and messages routed to its thread have nowhere to land. The failure mode looks like: `bindings.json` shows `managed: true` for the new session, but `daemon.log` has no matching `register outcome=ok` line.
+`claudePath` + `claudeArgs` come from the **same** `CLAUDE_DISCORD_SPAWN_CMD` env var documented above. The default `claude --dangerously-load-development-channels plugin:discord@dancer430-discord` loads the discord MCP plugin in the spawned child so it can `register` with the daemon over the IPC socket. Without a channel-loading flag (`--dangerously-load-development-channels` for this plugin id, or `--channels` if you've published to an allowlisted source), the child comes up at the welcome prompt with no plugin loaded, never registers, and messages routed to its thread have nowhere to land. A subtler failure: launching the child with the wrong flag — `--channels` against an unapproved source like `plugin:discord@dancer430-discord` — lets the daemon register the binding (the shim still loads), but Claude Code silently drops the MCP channel notifications, so `bindings.json` shows `managed: true` and `daemon.log` has a matching `register outcome=ok` line, yet the spawned session never reacts to inbound messages.
 
 **Pre-approving the trust + MCP dialogs:**
 
