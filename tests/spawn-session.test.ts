@@ -299,6 +299,23 @@ describe('spawnClaude fd-leak fix', () => {
     expect(r.ok).toBe(false)
     expect(closedFds).toEqual([42])
   })
+
+  test('closes fd on parent side after successful spawn (no fd leak)', () => {
+    const closedFds: number[] = []
+    mock.module('fs', () => ({
+      ...require('fs'),
+      closeSync: (fd: number) => { closedFds.push(fd) },
+    }))
+    const spawnStub: any = () => ({ pid: 7777, unref() {} })
+    const r = spawnClaude({
+      cwd: '/root/sub', threadName: 'sub',
+      command: ['claude'], env: {}, logPath: '/tmp/x.log',
+      spawn: spawnStub,
+      openSync: ((_: string, _f: string, _m: number) => 99) as any,
+    })
+    expect(r).toEqual({ ok: true, pid: 7777 })
+    expect(closedFds).toEqual([99])
+  })
 })
 
 import { handleSpawnCommand } from '../src/spawn-session'

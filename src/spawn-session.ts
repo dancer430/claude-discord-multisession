@@ -158,6 +158,7 @@ export function spawnClaude(args: {
       stdio: ['ignore', fd, fd],
     })
     child.unref()
+    try { closeSync(fd) } catch {}
     return { ok: true, pid: child.pid ?? -1 }
   } catch (err) {
     try { closeSync(fd) } catch {}
