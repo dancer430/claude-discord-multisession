@@ -110,3 +110,54 @@ export function parseSpawnCommand(
   if (rawPath.length === 0) return null
   return { rawPath }
 }
+
+import type { spawn as NodeSpawn } from 'child_process'
+import type { openSync as NodeOpenSync } from 'fs'
+
+export type SpawnOk = { ok: true; pid: number }
+export type SpawnErr = { ok: false; code: 'spawn_failed'; message: string }
+export type SpawnResult = SpawnOk | SpawnErr
+
+/**
+ * Detached-spawns `claude` (or whatever `command[0]` resolves to) with cwd
+ * set, with logs appended to `logPath`, and with `DISCORD_THREAD_ID=auto`
+ * + `DISCORD_THREAD_NAME=<threadName>` forced in env. The daemon's idle-exit
+ * does not have to wait for the child (`.unref()`).
+ *
+ * Env composition order: caller's `env` first, then our two thread vars on
+ * top — so a hostile caller cannot smuggle a different thread id/name in
+ * via `env`.
+ */
+export function spawnClaude(args: {
+  cwd: string
+  threadName: string
+  command: string[]
+  env: NodeJS.ProcessEnv
+  logPath: string
+  spawn: typeof NodeSpawn
+  openSync: typeof NodeOpenSync
+}): SpawnResult {
+  let fd: number
+  try {
+    fd = args.openSync(args.logPath, 'a', 0o600)
+  } catch (err) {
+    return { ok: false, code: 'spawn_failed', message: `open ${args.logPath} failed: ${(err as Error).message}` }
+  }
+  const finalEnv = {
+    ...args.env,
+    DISCORD_THREAD_ID: 'auto',
+    DISCORD_THREAD_NAME: args.threadName,
+  }
+  try {
+    const child = args.spawn(args.command[0]!, args.command.slice(1), {
+      cwd: args.cwd,
+      env: finalEnv,
+      detached: true,
+      stdio: ['ignore', fd, fd],
+    })
+    child.unref()
+    return { ok: true, pid: child.pid ?? -1 }
+  } catch (err) {
+    return { ok: false, code: 'spawn_failed', message: (err as Error).message }
+  }
+}

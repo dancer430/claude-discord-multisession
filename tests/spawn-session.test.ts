@@ -185,3 +185,98 @@ describe('validateSpawnRequest', () => {
     expect(r.code).toBe('path_outside_allowlist')
   })
 })
+
+import { spawnClaude } from '../src/spawn-session'
+
+describe('spawnClaude', () => {
+  function makeSpawnStub(pid = 12345) {
+    const calls: any[] = []
+    const fn: any = (cmd: string, args: string[], opts: any) => {
+      calls.push({ cmd, args, opts })
+      return { pid, unref() { (fn as any).unrefed = true } }
+    }
+    fn.calls = calls
+    return fn
+  }
+  function makeOpenSync(fd = 7) {
+    const calls: any[] = []
+    const fn: any = (path: string, flags: string, mode: number) => {
+      calls.push({ path, flags, mode })
+      return fd
+    }
+    fn.calls = calls
+    return fn
+  }
+
+  test('spawns with cwd, env additions, detached, stdio fd', () => {
+    const spawnStub = makeSpawnStub()
+    const openSyncStub = makeOpenSync(11)
+    const r = spawnClaude({
+      cwd: '/root/sub',
+      threadName: 'sub',
+      command: ['claude', '--channels', 'plugin:discord@danielfbm-discord'],
+      env: { PATH: '/bin', HTTPS_PROXY: 'http://proxy:8080' },
+      logPath: '/tmp/spawned-abc.log',
+      spawn: spawnStub,
+      openSync: openSyncStub,
+    })
+    expect(r).toEqual({ ok: true, pid: 12345 })
+    expect(spawnStub.calls).toHaveLength(1)
+    const call = spawnStub.calls[0]
+    expect(call.cmd).toBe('claude')
+    expect(call.args).toEqual(['--channels', 'plugin:discord@danielfbm-discord'])
+    expect(call.opts.cwd).toBe('/root/sub')
+    expect(call.opts.detached).toBe(true)
+    expect(call.opts.stdio).toEqual(['ignore', 11, 11])
+    expect(call.opts.env.DISCORD_THREAD_ID).toBe('auto')
+    expect(call.opts.env.DISCORD_THREAD_NAME).toBe('sub')
+    expect(call.opts.env.HTTPS_PROXY).toBe('http://proxy:8080')
+    expect(call.opts.env.PATH).toBe('/bin')
+    expect(openSyncStub.calls[0].path).toBe('/tmp/spawned-abc.log')
+    expect((spawnStub as any).unrefed).toBe(true)
+  })
+
+  test('caller-supplied env entries do NOT override DISCORD_THREAD_ID / NAME', () => {
+    const spawnStub = makeSpawnStub()
+    const r = spawnClaude({
+      cwd: '/root/sub', threadName: 'sub',
+      command: ['claude'],
+      env: { DISCORD_THREAD_ID: 'attacker', DISCORD_THREAD_NAME: 'attacker' },
+      logPath: '/tmp/x.log',
+      spawn: spawnStub, openSync: makeOpenSync(),
+    })
+    expect(r.ok).toBe(true)
+    expect(spawnStub.calls[0].opts.env.DISCORD_THREAD_ID).toBe('auto')
+    expect(spawnStub.calls[0].opts.env.DISCORD_THREAD_NAME).toBe('sub')
+  })
+
+  test('returns spawn_failed when spawn throws ENOENT', () => {
+    const spawnStub: any = () => {
+      throw Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' })
+    }
+    const r = spawnClaude({
+      cwd: '/root/sub', threadName: 'sub',
+      command: ['no-such-binary'],
+      env: {}, logPath: '/tmp/x.log',
+      spawn: spawnStub, openSync: makeOpenSync(),
+    })
+    expect(r.ok).toBe(false)
+    if (r.ok) throw new Error('unreachable')
+    expect(r.code).toBe('spawn_failed')
+    expect(r.message).toContain('ENOENT')
+  })
+
+  test('returns spawn_failed when openSync throws', () => {
+    const r = spawnClaude({
+      cwd: '/root/sub', threadName: 'sub',
+      command: ['claude'], env: {},
+      logPath: '/no/such/dir/x.log',
+      spawn: makeSpawnStub(),
+      openSync: ((_: string) => { throw new Error('EACCES') }) as any,
+    })
+    expect(r.ok).toBe(false)
+    if (r.ok) throw new Error('unreachable')
+    expect(r.code).toBe('spawn_failed')
+    expect(r.message).toContain('EACCES')
+  })
+})
