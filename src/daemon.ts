@@ -39,6 +39,13 @@ export type DaemonOpts = {
   /** Override the claude binary path used by create_thread spawn. Defaults to 'claude' from PATH. */
   claudePath?: string
   /**
+   * Override the user-config path the spawn-manager pre-writes trust into
+   * for each spawned cwd. Defaults to `~/.claude.json`. Tests set this to
+   * a temp file so the integration suite never touches the developer's
+   * real config.
+   */
+  claudeConfigPath?: string
+  /**
    * Called after the internal shutdown unlinks sock + pid. The entrypoint
    * uses this to destroy the discord.js client and call `process.exit(0)`,
    * because discord.js's gateway WebSocket otherwise keeps the event loop
@@ -239,6 +246,7 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
   const { stateDir, ops, idleExitMs, onShutdown } = opts
   const tmuxRunner: TmuxRunner = opts.tmuxRunner ?? new RealTmuxRunner()
   const claudePath = opts.claudePath ?? 'claude'
+  const claudeConfigPath = opts.claudeConfigPath
   mkdirSync(stateDir, { recursive: true, mode: 0o700 })
   const sockPath = join(stateDir, 'daemon.sock')
   const pidPath = join(stateDir, 'daemon.pid')
@@ -577,7 +585,7 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
     })
 
     try {
-      await startSpawn({ runner: tmuxRunner, sessionId, cwd, label, threadNameOverride, claudePath })
+      await startSpawn({ runner: tmuxRunner, sessionId, cwd, label, threadNameOverride, claudePath, claudeConfigPath })
     } catch (e) {
       spawnPending.delete(sessionId)
       return errText('create_thread_spawn_failed', String((e as Error).message))

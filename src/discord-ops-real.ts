@@ -55,7 +55,30 @@ export class RealDiscordOps implements DiscordOps {
     }
   }
 
+  /**
+   * Block until the discord.js client has fired `clientReady` (a.k.a. the
+   * legacy `ready` event). The IPC server opens its socket immediately at
+   * daemon boot, while `client.login()` still has to finish its gateway
+   * handshake — a `tool_call` that lands in that window will see
+   * `client.channels.fetch(id)` return `null` for valid channels, surfacing
+   * as a transient `channel ${id} not found or not text-based`. Resolves
+   * immediately once the client is ready.
+   */
+  private async waitForClientReady(): Promise<void> {
+    if (this.client.isReady()) return
+    await new Promise<void>(resolve => {
+      const done = () => {
+        this.client.off('clientReady', done)
+        this.client.off('ready', done)
+        resolve()
+      }
+      this.client.once('clientReady', done)
+      this.client.once('ready', done)
+    })
+  }
+
   private async fetchTextChannel(id: string) {
+    await this.waitForClientReady()
     const ch = await this.client.channels.fetch(id)
     if (!ch || !ch.isTextBased()) throw new Error(`channel ${id} not found or not text-based`)
     return ch as any
@@ -170,6 +193,7 @@ export class RealDiscordOps implements DiscordOps {
   }
 
   async archiveThread(thread_id: string): Promise<void> {
+    await this.waitForClientReady()
     const ch: any = await this.client.channels.fetch(thread_id)
     if (!ch || typeof ch.setArchived !== 'function') {
       throw new Error(`channel ${thread_id} is not an archivable thread`)
@@ -179,6 +203,7 @@ export class RealDiscordOps implements DiscordOps {
 
   async verifyThreadParent(thread_id: string): Promise<string | null> {
     try {
+      await this.waitForClientReady()
       const ch: any = await this.client.channels.fetch(thread_id)
       if (!ch || !ch.isThread()) return null
       return ch.parentId ?? null

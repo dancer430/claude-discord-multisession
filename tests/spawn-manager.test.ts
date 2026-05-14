@@ -1,4 +1,7 @@
 import { test, expect, describe } from 'bun:test'
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, statSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { type TmuxRunner, FakeTmuxRunner } from '../src/spawn-manager'
 import {
   computeSessionId,
@@ -6,10 +9,25 @@ import {
   startSpawn,
   killSpawn,
   isAlive,
+  ensureCwdTrusted,
+  ensureMcpJsonServersEnabled,
   PROXY_ENV,
   TMUX_PREFIX,
 } from '../src/spawn-manager'
 import { deriveSessionId } from '../src/session-id'
+
+function tempConfig(initial?: unknown): string {
+  const dir = mkdtempSync(join(tmpdir(), 'claude-trust-'))
+  const file = join(dir, 'claude.json')
+  if (initial !== undefined) writeFileSync(file, JSON.stringify(initial))
+  return file
+}
+
+function tempCwd(mcpJson?: unknown): string {
+  const dir = mkdtempSync(join(tmpdir(), 'claude-mcp-cwd-'))
+  if (mcpJson !== undefined) writeFileSync(join(dir, '.mcp.json'), JSON.stringify(mcpJson))
+  return dir
+}
 
 describe('FakeTmuxRunner', () => {
   test('records calls and returns scripted exit codes', async () => {
@@ -174,6 +192,251 @@ describe('startSpawn', () => {
     expect(err).not.toBeNull()
     expect(err!.message).toMatch(/invalid cwd/i)
     expect(runner.calls).toHaveLength(0)
+  })
+})
+
+describe('ensureCwdTrusted', () => {
+  test('creates the file when missing, with minimal trusted project entry', async () => {
+    const file = tempConfig()
+    rmSync(file, { force: true })
+    expect(existsSync(file)).toBe(false)
+    await ensureCwdTrusted('/Users/me/repo', file)
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    expect(parsed.projects['/Users/me/repo'].hasTrustDialogAccepted).toBe(true)
+  })
+
+  test('adds entry without touching unrelated top-level keys', async () => {
+    const file = tempConfig({ theme: 'light', numStartups: 7, projects: {} })
+    await ensureCwdTrusted('/Users/me/repo', file)
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    expect(parsed.theme).toBe('light')
+    expect(parsed.numStartups).toBe(7)
+    expect(parsed.projects['/Users/me/repo'].hasTrustDialogAccepted).toBe(true)
+  })
+
+  test('preserves other existing project entries', async () => {
+    const file = tempConfig({
+      projects: {
+        '/Users/me/other': { hasTrustDialogAccepted: true, lastCost: 1.23 },
+      },
+    })
+    await ensureCwdTrusted('/Users/me/repo', file)
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    expect(parsed.projects['/Users/me/other'].hasTrustDialogAccepted).toBe(true)
+    expect(parsed.projects['/Users/me/other'].lastCost).toBe(1.23)
+    expect(parsed.projects['/Users/me/repo'].hasTrustDialogAccepted).toBe(true)
+  })
+
+  test('idempotent: no write when already trusted (preserves extra keys)', async () => {
+    const file = tempConfig({
+      projects: {
+        '/Users/me/repo': { hasTrustDialogAccepted: true, lastCost: 9.99 },
+      },
+    })
+    await ensureCwdTrusted('/Users/me/repo', file)
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    expect(parsed.projects['/Users/me/repo'].hasTrustDialogAccepted).toBe(true)
+    expect(parsed.projects['/Users/me/repo'].lastCost).toBe(9.99)
+  })
+
+  test('flips false to true while preserving sibling keys on the entry', async () => {
+    const file = tempConfig({
+      projects: {
+        '/Users/me/repo': { hasTrustDialogAccepted: false, allowedTools: ['Edit'] },
+      },
+    })
+    await ensureCwdTrusted('/Users/me/repo', file)
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    expect(parsed.projects['/Users/me/repo'].hasTrustDialogAccepted).toBe(true)
+    expect(parsed.projects['/Users/me/repo'].allowedTools).toEqual(['Edit'])
+  })
+})
+
+describe('startSpawn calls ensureCwdTrusted', () => {
+  test('writes trust entry for cwd before invoking tmux', async () => {
+    const file = tempConfig({ projects: {} })
+    const runner = new FakeTmuxRunner()
+    runner.scriptExit(0)
+    await startSpawn({
+      runner,
+      sessionId: 'sid1sid1sid1',
+      cwd: '/Users/me/proj',
+      claudePath: '/usr/bin/claude',
+      claudeConfigPath: file,
+    })
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    expect(parsed.projects['/Users/me/proj'].hasTrustDialogAccepted).toBe(true)
+    expect(runner.calls).toHaveLength(1)
+  })
+
+  test('proceeds with tmux even when trust write throws', async () => {
+    const runner = new FakeTmuxRunner()
+    runner.scriptExit(0)
+    // Point at an unwritable path so ensureCwdTrusted's rename fails — the
+    // spawn must still go through.
+    await startSpawn({
+      runner,
+      sessionId: 'sid2sid2sid2',
+      cwd: '/Users/me/proj',
+      claudePath: '/usr/bin/claude',
+      claudeConfigPath: '/nonexistent-dir-spawn-test/.claude.json',
+    })
+    expect(runner.calls).toHaveLength(1)
+  })
+})
+
+describe('ensureMcpJsonServersEnabled', () => {
+  test('no-op when cwd has no .mcp.json', async () => {
+    const cwd = tempCwd()              // no .mcp.json written
+    const file = tempConfig({ projects: {} })
+    const before = readFileSync(file, 'utf8')
+    await ensureMcpJsonServersEnabled(cwd, file)
+    expect(readFileSync(file, 'utf8')).toBe(before)
+  })
+
+  test('no-op when .mcp.json has no mcpServers / empty object', async () => {
+    const cwd = tempCwd({})
+    const file = tempConfig({ projects: {} })
+    const before = readFileSync(file, 'utf8')
+    await ensureMcpJsonServersEnabled(cwd, file)
+    expect(readFileSync(file, 'utf8')).toBe(before)
+
+    const cwd2 = tempCwd({ mcpServers: {} })
+    const before2 = readFileSync(file, 'utf8')
+    await ensureMcpJsonServersEnabled(cwd2, file)
+    expect(readFileSync(file, 'utf8')).toBe(before2)
+  })
+
+  test('creates project entry when missing, listing the .mcp.json server names', async () => {
+    const cwd = tempCwd({ mcpServers: { discord: { command: 'bun', args: [] } } })
+    const file = tempConfig({ projects: {} })
+    await ensureMcpJsonServersEnabled(cwd, file)
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    expect(parsed.projects[cwd].enabledMcpjsonServers).toEqual(['discord'])
+    expect(parsed.projects[cwd].disabledMcpjsonServers).toEqual([])
+  })
+
+  test('creates ~/.claude.json itself when missing', async () => {
+    const cwd = tempCwd({ mcpServers: { discord: {} } })
+    const file = tempConfig()
+    rmSync(file, { force: true })
+    expect(existsSync(file)).toBe(false)
+    await ensureMcpJsonServersEnabled(cwd, file)
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    expect(parsed.projects[cwd].enabledMcpjsonServers).toEqual(['discord'])
+  })
+
+  test('adds missing names while preserving existing enabled entries', async () => {
+    const cwd = tempCwd({ mcpServers: { discord: {}, fs: {} } })
+    const file = tempConfig({
+      projects: {
+        [cwd]: { enabledMcpjsonServers: ['unrelated'], disabledMcpjsonServers: [] },
+      },
+    })
+    await ensureMcpJsonServersEnabled(cwd, file)
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    const enabled = new Set(parsed.projects[cwd].enabledMcpjsonServers)
+    expect(enabled.has('unrelated')).toBe(true)
+    expect(enabled.has('discord')).toBe(true)
+    expect(enabled.has('fs')).toBe(true)
+  })
+
+  test('idempotent: no write when every name is already enabled', async () => {
+    const cwd = tempCwd({ mcpServers: { discord: {} } })
+    const file = tempConfig({
+      projects: {
+        [cwd]: { enabledMcpjsonServers: ['discord'], disabledMcpjsonServers: [] },
+      },
+    })
+    const mtimeBefore = statSync(file).mtimeMs
+    // mkdtempSync's filesystem-mtime resolution can be coarse; force a delay
+    // bigger than the worst-case (HFS+'s 1-second granularity).
+    await new Promise(r => setTimeout(r, 1100))
+    await ensureMcpJsonServersEnabled(cwd, file)
+    expect(statSync(file).mtimeMs).toBe(mtimeBefore)
+  })
+
+  test('moves a previously-disabled server back into enabled', async () => {
+    const cwd = tempCwd({ mcpServers: { discord: {} } })
+    const file = tempConfig({
+      projects: {
+        [cwd]: { enabledMcpjsonServers: [], disabledMcpjsonServers: ['discord'] },
+      },
+    })
+    await ensureMcpJsonServersEnabled(cwd, file)
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    expect(parsed.projects[cwd].enabledMcpjsonServers).toEqual(['discord'])
+    expect(parsed.projects[cwd].disabledMcpjsonServers).toEqual([])
+  })
+
+  test('does not touch unrelated project entries or top-level keys', async () => {
+    const cwd = tempCwd({ mcpServers: { discord: {} } })
+    const file = tempConfig({
+      theme: 'light',
+      numStartups: 9,
+      projects: {
+        '/Users/me/other': { hasTrustDialogAccepted: true, enabledMcpjsonServers: ['foo'] },
+      },
+    })
+    await ensureMcpJsonServersEnabled(cwd, file)
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    expect(parsed.theme).toBe('light')
+    expect(parsed.numStartups).toBe(9)
+    expect(parsed.projects['/Users/me/other'].hasTrustDialogAccepted).toBe(true)
+    expect(parsed.projects['/Users/me/other'].enabledMcpjsonServers).toEqual(['foo'])
+  })
+
+  test('preserves sibling fields on the project entry (e.g. hasTrustDialogAccepted)', async () => {
+    const cwd = tempCwd({ mcpServers: { discord: {} } })
+    const file = tempConfig({
+      projects: {
+        [cwd]: {
+          hasTrustDialogAccepted: true,
+          allowedTools: ['Edit'],
+          lastCost: 4.2,
+        },
+      },
+    })
+    await ensureMcpJsonServersEnabled(cwd, file)
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    expect(parsed.projects[cwd].hasTrustDialogAccepted).toBe(true)
+    expect(parsed.projects[cwd].allowedTools).toEqual(['Edit'])
+    expect(parsed.projects[cwd].lastCost).toBe(4.2)
+    expect(parsed.projects[cwd].enabledMcpjsonServers).toEqual(['discord'])
+  })
+})
+
+describe('startSpawn calls ensureMcpJsonServersEnabled', () => {
+  test('enables .mcp.json servers for cwd before invoking tmux', async () => {
+    const cwd = tempCwd({ mcpServers: { discord: {} } })
+    const file = tempConfig({ projects: {} })
+    const runner = new FakeTmuxRunner()
+    runner.scriptExit(0)
+    await startSpawn({
+      runner,
+      sessionId: 'sidmcpe2e1234',
+      cwd,
+      claudePath: '/usr/bin/claude',
+      claudeConfigPath: file,
+    })
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    expect(parsed.projects[cwd].hasTrustDialogAccepted).toBe(true)
+    expect(parsed.projects[cwd].enabledMcpjsonServers).toEqual(['discord'])
+    expect(runner.calls).toHaveLength(1)
+  })
+
+  test('proceeds with tmux even when mcp-enable write throws', async () => {
+    const cwd = tempCwd({ mcpServers: { discord: {} } })
+    const runner = new FakeTmuxRunner()
+    runner.scriptExit(0)
+    await startSpawn({
+      runner,
+      sessionId: 'sidmcpfail1234',
+      cwd,
+      claudePath: '/usr/bin/claude',
+      claudeConfigPath: '/nonexistent-dir-spawn-mcp-test/.claude.json',
+    })
+    expect(runner.calls).toHaveLength(1)
   })
 })
 
