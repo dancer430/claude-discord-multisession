@@ -267,7 +267,10 @@ export async function handleSpawnCommand(args: {
       code: result.code,
       message: result.message,
     })
-    await args.ops.reply(args.parentChannelId, `❌ 启动失败：${result.message}`)
+    const hint = result.message.includes('ENOENT')
+      ? `（命令未找到。当前: \`${args.command.join(' ')}\`；可通过 env CLAUDE_DISCORD_SPAWN_CMD 覆盖）`
+      : ''
+    await args.ops.reply(args.parentChannelId, `❌ 启动失败：${result.message}${hint}`)
     return
   }
 

@@ -436,6 +436,24 @@ describe('handleSpawnCommand', () => {
     expect(logCalls[0].code).toBe('spawn_failed')
   })
 
+  test('ENOENT failure reply includes CLAUDE_DISCORD_SPAWN_CMD hint', async () => {
+    const { ops, openSyncStub, logCalls, access } = setup()
+    const failSpawn: any = () => { throw Object.assign(new Error('spawn claude ENOENT'), { code: 'ENOENT' }) }
+    await handleSpawnCommand({
+      rawPath: '/root/sub', senderId: 'user-1',
+      parentChannelId: 'parent-1', access, ops,
+      command: ['claude', '--channels', 'plugin:discord@x'], env: {},
+      stateDir: '/tmp/state',
+      statSync: (() => ({ isDirectory: () => true })) as any,
+      spawn: failSpawn, openSync: openSyncStub,
+      log: (f) => logCalls.push(f), homeDir: '/Users/me',
+    })
+    const replies = ops.calls.filter(c => c.kind === 'reply')
+    const errReply = String((replies[1] as any).text)
+    expect(errReply).toContain('CLAUDE_DISCORD_SPAWN_CMD')
+    expect(errReply).toContain('claude --channels plugin:discord@x')
+  })
+
   test('log path lives under stateDir/spawned', async () => {
     const { ops, spawnStub, logCalls, access } = setup()
     let opened = ''
