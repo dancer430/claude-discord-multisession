@@ -51,6 +51,20 @@ export type Access = {
    * absolute path; symlinks are resolved at validation time.
    */
   threadCwdRoot?: string
+  /**
+   * Absolute path prefixes under which `起子区 <path>` in a parent channel
+   * may spawn a `claude` subprocess. Prefix-with-boundary matching (so
+   * `/Users/me/Projects` allows `/Users/me/Projects/foo` but rejects
+   * `/Users/me/ProjectsEvil`). Missing or empty disables the spawn
+   * feature entirely.
+   */
+  spawnAllowedRoots?: string[]
+  /**
+   * Trigger keyword for the parent-channel spawn command. Defaults to
+   * `起子区`. Operator-configurable so English channels can use e.g.
+   * `/spawn`.
+   */
+  spawnTrigger?: string
 }
 
 export function defaultAccess(): Access {
@@ -81,6 +95,8 @@ export function loadAccess(file: string): Access {
       reactionGuidance: parsed.reactionGuidance,
       askUserQuestionHook: parsed.askUserQuestionHook,
       threadCwdRoot: parsed.threadCwdRoot,
+      spawnAllowedRoots: parsed.spawnAllowedRoots,
+      spawnTrigger: parsed.spawnTrigger,
     }
   } catch {
     try { renameSync(file, `${file}.corrupt-${Date.now()}`) } catch {}
