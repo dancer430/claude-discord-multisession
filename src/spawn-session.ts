@@ -182,6 +182,16 @@ export function spawnClaude(args: {
     )
     child.unref()
     try { closeSync(fd) } catch {}
+    // Dismiss the `--dangerously-load-development-channels` interactive
+    // WARNING prompt that blocks the detached child. See the matching
+    // comment in spawn-manager.ts startSpawn. Fire-and-forget; no-op if
+    // the spawn cmd doesn't include the flag.
+    setTimeout(() => {
+      try {
+        const k = args.spawn('tmux', ['send-keys', '-t', tmuxSessionName, 'Enter'], { stdio: 'ignore', detached: true })
+        k.unref()
+      } catch {}
+    }, 3000)
     return { ok: true, pid: child.pid ?? -1 }
   } catch (err) {
     try { closeSync(fd) } catch {}

@@ -299,6 +299,17 @@ export async function startSpawn(input: SpawnInput): Promise<string> {
   if (r.exitCode !== 0) {
     throw new Error(`tmux new-session failed: ${r.stderr.trim() || r.stdout.trim() || `exit ${r.exitCode}`}`)
   }
+  // `--dangerously-load-development-channels` (the default spawn cmd, see
+  // daemon-entry.ts) prints an interactive WARNING and waits for Enter
+  // before loading the channel plugin. In detached tmux there's no one
+  // to press it, so the child hangs and create_thread hits its 30s
+  // register timeout. Schedule a one-shot send-keys to dismiss it. If
+  // the operator picked a CLAUDE_DISCORD_SPAWN_CMD without the flag,
+  // the Enter is a harmless no-op against claude's input box. Fire and
+  // forget — startSpawn must not block on this.
+  setTimeout(() => {
+    void runner.run(['send-keys', '-t', name, 'Enter']).catch(() => {})
+  }, 3000)
   return name
 }
 
