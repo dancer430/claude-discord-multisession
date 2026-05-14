@@ -420,6 +420,39 @@ of creating a fresh Discord thread. If a binding shows up that you cannot
 recall creating, grep the log for its `session_id` to see the original
 register frame's `cwd` and timestamp.
 
+## Spawning Claude sessions from Discord
+
+### Spawning Claude sessions from a parent channel
+
+An authorized user can post `起子区 /abs/path` in the configured parent channel and the daemon will launch a `claude` subprocess in that working directory. The new process auto-registers and creates its own thread; the user never has to open a terminal.
+
+**Configuration in `~/.claude/channels/discord/access.json`:**
+
+- `spawnAllowedRoots: ["/Users/you/Projects"]` — array of absolute path prefixes. **Required** to enable the feature; missing or empty disables it entirely. Matching is prefix-with-boundary, so `/Users/you/Projects` allows `/Users/you/Projects/anything` but rejects `/Users/you/ProjectsEvil`.
+- `spawnTrigger: "起子区"` — optional. Defaults to `起子区`. Set to `/spawn` (or any keyword) to change the command word.
+
+**Environment overrides:**
+
+- `CLAUDE_DISCORD_SPAWN_CMD` — overrides the spawn argv. Whitespace-split. Default: `claude --channels plugin:discord@danielfbm-discord`. Use this on dev installs (`claude --dangerously-load-development-channels …`) or to wrap in `tmux` if your `claude` binary requires a TTY.
+
+**Security:**
+
+- Only senders listed in `access.allowFrom` can trigger a spawn.
+- Only opted-in parent channels (those added via `/discord:access group add`, or the configured `parentChannelId`) respond to the trigger.
+- The daemon never invokes a shell; the path is passed verbatim as `cwd` to `child_process.spawn` and is never concatenated into a command string.
+- Relative paths are rejected. `~` is expanded against the daemon's `$HOME`.
+
+**Forensic audit:**
+
+Every spawn attempt writes a single line to `daemon.log`:
+
+```
+discord daemon: spawn outcome=ok pid=12345 cwd=/Users/you/Projects/foo ...
+discord daemon: spawn outcome=err code=path_outside_allowlist raw_path=/etc ...
+```
+
+Subprocess stdout/stderr go to `~/.claude/channels/discord/spawned/spawn-<id>.log`.
+
 ## License
 
 Apache-2.0. See [LICENSE](./LICENSE). Original work copyright Anthropic;
