@@ -256,6 +256,16 @@ function registerHandlers(server: Server): void {
         description: 'List all managed (create_thread-spawned) sessions with cwd, tmux liveness, and Discord thread metadata.',
         inputSchema: { type: 'object', properties: {} },
       },
+      {
+        name: 'list_project_dirs',
+        description: 'Search for git repositories under the configured threadCwdRoot (default ~/A-project). Returns absolute cwds the user can pick from when create_thread is needed. Empty/missing query returns all repos. Matches by directory basename (case-insensitive substring). Use this before create_thread when the user names a project loosely instead of giving an absolute path.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Case-insensitive substring matched against each repo directory basename. Omit or pass an empty string to list every repo.' },
+          },
+        },
+      },
     ],
   }))
 
