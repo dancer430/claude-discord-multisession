@@ -60,6 +60,33 @@ async function simulateChildRegister(sockPath: string, session_id: string, cwd: 
 }
 
 describe('daemon: create_thread happy path', () => {
+  test('forwards claudeArgs into the tmux command when create_thread spawns', async () => {
+    const ops = new FakeDiscordOps()
+    const tmuxRunner = new FakeTmuxRunner()
+    tmuxRunner.scriptExit(0)
+    const localDaemon = await startDaemon({
+      stateDir: dir,
+      ops,
+      idleExitMs: 60_000,
+      tmuxRunner,
+      claudeConfigPath: join(dir, 'fake-claude.json'),
+      claudeArgs: ['--channels', 'plugin:discord@dancer430-discord'],
+    })
+    try {
+      const sockPath = join(dir, 'daemon.sock')
+      const mgr = await registerDm(sockPath, 'mgr-claudeargs')
+      const cwd = '/tmp'
+      const { sessionId: childSid } = computeSessionId(cwd)
+      writeFrame(mgr.sock, { type: 'tool_call', id: 7, name: 'create_thread', args: { cwd } })
+      await simulateChildRegister(sockPath, childSid, cwd)
+      await recv(mgr.it)
+      const tmuxCommand = tmuxRunner.calls[0][4]
+      expect(tmuxCommand).toContain("'--channels' 'plugin:discord@dancer430-discord'")
+    } finally {
+      await localDaemon.shutdown()
+    }
+  })
+
   test('spawns tmux, child registers via auto, returns thread info, binding becomes managed', async () => {
     const ops = new FakeDiscordOps()
     const tmuxRunner = new FakeTmuxRunner()
