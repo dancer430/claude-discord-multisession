@@ -63,6 +63,25 @@ describe('access', () => {
     expect(loadAccess(file).reactionGuidance).toBeUndefined()
   })
 
+  test('roundtrips spawnAllowedRoots and spawnTrigger', () => {
+    const a: Access = {
+      ...defaultAccess(),
+      spawnAllowedRoots: ['/Users/me/Projects', '/tmp'],
+      spawnTrigger: '/spawn',
+    }
+    saveAccess(file, a)
+    const loaded = loadAccess(file)
+    expect(loaded.spawnAllowedRoots).toEqual(['/Users/me/Projects', '/tmp'])
+    expect(loaded.spawnTrigger).toBe('/spawn')
+  })
+
+  test('spawn fields are absent when not set', () => {
+    saveAccess(file, defaultAccess())
+    const loaded = loadAccess(file)
+    expect(loaded.spawnAllowedRoots).toBeUndefined()
+    expect(loaded.spawnTrigger).toBeUndefined()
+  })
+
   test('saveAccess writes atomically and chmods 0600', () => {
     saveAccess(file, defaultAccess())
     expect(statSync(file).mode & 0o777).toBe(0o600)

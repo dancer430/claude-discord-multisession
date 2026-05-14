@@ -18,18 +18,22 @@ import {
   ButtonBuilder, ButtonStyle, ActionRowBuilder,
   type Message, type Interaction,
 } from 'discord.js'
-import { readFileSync, chmodSync, readdirSync, rmSync, mkdirSync } from 'fs'
+import { readFileSync, chmodSync, readdirSync, rmSync, mkdirSync, openSync, statSync } from 'fs'
 import { join } from 'path'
+import { spawn as nodeSpawn } from 'child_process'
+import { homedir } from 'os'
 import { startDaemon } from './daemon'
 import { RealDiscordOps } from './discord-ops-real'
 import { loadAccess } from './access'
 import { getStateDir } from './state-dir'
+import { handleSpawnCommand, logSpawn, parseSpawnCommand } from './spawn-session'
 
 const PERMISSION_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
 
 export async function runDaemon(): Promise<void> {
   const stateDir = getStateDir()
   mkdirSync(stateDir, { recursive: true, mode: 0o700 })
+  mkdirSync(join(stateDir, 'spawned'), { recursive: true, mode: 0o700 })
   const envFile = join(stateDir, '.env')
   try {
     chmodSync(envFile, 0o600)
@@ -84,6 +88,14 @@ export async function runDaemon(): Promise<void> {
   const accessFile = join(stateDir, 'access.json')
   const ops = new RealDiscordOps(client, () => loadAccess(accessFile), stateDir)
 
+  // Operator can override the full `claude` invocation via env. Default
+  // matches the README's plugin-install form. Shell-split is intentionally
+  // naive (whitespace-only) — operators who need quoting should pre-split.
+  const spawnCommand = (process.env.CLAUDE_DISCORD_SPAWN_CMD ?? 'claude --channels plugin:discord@danielfbm-discord')
+    .trim()
+    .split(/\s+/)
+    .filter(s => s.length > 0)
+
   const handle = await startDaemon({
     stateDir, ops, idleExitMs: 60_000,
     onShutdown: async () => {
@@ -115,6 +127,39 @@ export async function runDaemon(): Promise<void> {
 
       // Permission-reply text intercept (only for allow-listed senders).
       const access = loadAccess(accessFile)
+
+      // Spawn-trigger intercept: parent-channel message starting with
+      // access.spawnTrigger from an authorized sender. Must early-return
+      // so deliverInbound below doesn't also route this into a DM session.
+      {
+        const isParentChannel = !isDM && !('isThread' in msg.channel && msg.channel.isThread())
+        const isOptedIn = isParentChannel && (
+          msg.channelId === access.parentChannelId
+          || msg.channelId in access.groups
+        )
+        if (isOptedIn) {
+          const m = parseSpawnCommand(msg.content, access.spawnTrigger ?? '起子区')
+          if (m) {
+            await handleSpawnCommand({
+              rawPath: m.rawPath,
+              senderId: msg.author.id,
+              parentChannelId: msg.channelId,
+              access,
+              ops,
+              command: spawnCommand,
+              env: process.env,
+              stateDir,
+              statSync,
+              spawn: nodeSpawn,
+              openSync,
+              log: logSpawn,
+              homeDir: homedir(),
+            })
+            return
+          }
+        }
+      }
+
       if (access.allowFrom.includes(msg.author.id)) {
         const m = PERMISSION_REPLY_RE.exec(msg.content)
         if (m) {
