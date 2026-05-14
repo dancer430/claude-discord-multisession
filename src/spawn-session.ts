@@ -115,6 +115,7 @@ import type { spawn as NodeSpawn } from 'child_process'
 import { closeSync } from 'fs'
 import type { openSync as NodeOpenSync } from 'fs'
 import type { DiscordOps } from './discord-ops'
+import { watchAndDismissSpawnPrompts, type TmuxRunner } from './spawn-manager'
 
 export type SpawnOk = { ok: true; pid: number }
 export type SpawnErr = { ok: false; code: 'spawn_failed'; message: string }
@@ -182,16 +183,30 @@ export function spawnClaude(args: {
     )
     child.unref()
     try { closeSync(fd) } catch {}
-    // Dismiss the `--dangerously-load-development-channels` interactive
-    // WARNING prompt that blocks the detached child. See the matching
-    // comment in spawn-manager.ts startSpawn. Fire-and-forget; no-op if
-    // the spawn cmd doesn't include the flag.
-    setTimeout(() => {
-      try {
-        const k = args.spawn('tmux', ['send-keys', '-t', tmuxSessionName, 'Enter'], { stdio: 'ignore', detached: true })
-        k.unref()
-      } catch {}
-    }, 3000)
+    // Dismiss the interactive WARNING prompts (bypass-permissions and/or
+    // dangerously-load-development-channels) that may block the detached
+    // child. The dismissal is pane-content-aware — see
+    // watchAndDismissSpawnPrompts in spawn-manager.ts for why we cannot
+    // rely on flag presence. Wrap `args.spawn` in a TmuxRunner adapter so
+    // the same poller covers both spawn paths. Fire-and-forget.
+    const tmuxRunner: TmuxRunner = {
+      async run(argv: string[]) {
+        return await new Promise(resolve => {
+          let stdout = ''
+          let stderr = ''
+          try {
+            const p = args.spawn('tmux', argv, { stdio: ['ignore', 'pipe', 'pipe'] })
+            p.stdout?.on('data', (d: Buffer) => { stdout += d.toString() })
+            p.stderr?.on('data', (d: Buffer) => { stderr += d.toString() })
+            p.on('exit', (code: number | null) => resolve({ exitCode: code ?? -1, stdout, stderr }))
+            p.on('error', () => resolve({ exitCode: -1, stdout, stderr }))
+          } catch {
+            resolve({ exitCode: -1, stdout, stderr })
+          }
+        })
+      },
+    }
+    void watchAndDismissSpawnPrompts(tmuxRunner, tmuxSessionName).catch(() => {})
     return { ok: true, pid: child.pid ?? -1 }
   } catch (err) {
     try { closeSync(fd) } catch {}

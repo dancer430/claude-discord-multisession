@@ -299,18 +299,100 @@ export async function startSpawn(input: SpawnInput): Promise<string> {
   if (r.exitCode !== 0) {
     throw new Error(`tmux new-session failed: ${r.stderr.trim() || r.stdout.trim() || `exit ${r.exitCode}`}`)
   }
-  // `--dangerously-load-development-channels` (the default spawn cmd, see
-  // daemon-entry.ts) prints an interactive WARNING and waits for Enter
-  // before loading the channel plugin. In detached tmux there's no one
-  // to press it, so the child hangs and create_thread hits its 30s
-  // register timeout. Schedule a one-shot send-keys to dismiss it. If
-  // the operator picked a CLAUDE_DISCORD_SPAWN_CMD without the flag,
-  // the Enter is a harmless no-op against claude's input box. Fire and
-  // forget — startSpawn must not block on this.
-  setTimeout(() => {
-    void runner.run(['send-keys', '-t', name, 'Enter']).catch(() => {})
-  }, 3000)
+  // The default spawn cmd (see daemon-entry.ts) can trigger up to two
+  // interactive WARNING prompts that block the detached child until
+  // dismissed: a `--permission-mode bypassPermissions` warning (default
+  // selection "1. No, exit" — a bare Enter would quit claude) and a
+  // `--dangerously-load-development-channels` warning (default "1. I am
+  // using this for local development"). Which prompts actually appear
+  // depends on more than the CLI flags — user settings like
+  // `skipDangerousModePermissionPrompt` and the persisted
+  // `bypassPermissionsModeAccepted` can suppress them — so we cannot rely
+  // on flag presence to predict the screen. Instead we poll the pane
+  // content and dispatch the matching keystroke when a prompt is detected.
+  // Fire-and-forget; startSpawn must not block on this.
+  void watchAndDismissSpawnPrompts(runner, name).catch(() => {})
   return name
+}
+
+/**
+ * Pane snapshot → which (if any) of the known WARNING prompts is currently
+ * blocking the child. Pure; tested directly.
+ *   - 'bypass'    → `--permission-mode bypassPermissions` WARNING
+ *   - 'dangerous' → `--dangerously-load-development-channels` WARNING
+ *   - 'ready'     → past the warnings (main TUI banner visible)
+ *   - null        → neither — keep polling
+ */
+export function classifySpawnPane(pane: string): 'bypass' | 'dangerous' | 'ready' | null {
+  if (/Bypass Permissions mode/.test(pane) && /❯\s*1\.\s*No, exit/.test(pane)) {
+    return 'bypass'
+  }
+  if (/Loading development channels/.test(pane) && /❯\s*1\.\s*I am using this/.test(pane)) {
+    return 'dangerous'
+  }
+  // The main TUI banner contains the "Welcome" line and a ╭───…─╮ frame.
+  // "Listening for channel messages from" appears once the channel plugin
+  // is loaded — a positive signal that we are past both warnings.
+  if (/Welcome back|Listening for channel messages from/.test(pane)) {
+    return 'ready'
+  }
+  return null
+}
+
+/**
+ * Poll the tmux pane and send keystrokes to dismiss known startup prompts.
+ * Returns the keystrokes that were sent, in order, for testability. Stops
+ * early on:
+ *   - main TUI detected (ready)
+ *   - both known prompts dismissed
+ *   - session vanished (capture-pane exitCode ≠ 0)
+ *   - deadline reached
+ */
+export async function watchAndDismissSpawnPrompts(
+  runner: TmuxRunner,
+  tmuxName: string,
+  opts?: {
+    maxWaitMs?: number
+    pollIntervalMs?: number
+    maxPolls?: number
+    sleep?: (ms: number) => Promise<void>
+  },
+): Promise<Array<'2' | 'Enter'>> {
+  const maxWait = opts?.maxWaitMs ?? 25_000
+  const interval = opts?.pollIntervalMs ?? 800
+  const maxPolls = opts?.maxPolls ?? Number.POSITIVE_INFINITY
+  const sleep = opts?.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)))
+  const sent: Array<'2' | 'Enter'> = []
+  const dismissed = new Set<'bypass' | 'dangerous'>()
+  const deadline = Date.now() + maxWait
+
+  for (let polls = 0; polls < maxPolls && Date.now() < deadline; polls++) {
+    await sleep(interval)
+    if (dismissed.size >= 2) return sent
+    let pane: string
+    try {
+      const r = await runner.run(['capture-pane', '-t', tmuxName, '-p'])
+      if (r.exitCode !== 0) return sent   // session died
+      pane = r.stdout
+    } catch {
+      return sent
+    }
+    const kind = classifySpawnPane(pane)
+    if (kind === 'ready') return sent
+    if (kind === 'bypass' && !dismissed.has('bypass')) {
+      await runner.run(['send-keys', '-t', tmuxName, '2']).catch(() => {})
+      dismissed.add('bypass')
+      sent.push('2')
+      continue
+    }
+    if (kind === 'dangerous' && !dismissed.has('dangerous')) {
+      await runner.run(['send-keys', '-t', tmuxName, 'Enter']).catch(() => {})
+      dismissed.add('dangerous')
+      sent.push('Enter')
+      continue
+    }
+  }
+  return sent
 }
 
 export async function killSpawn(runner: TmuxRunner, tmuxSession: string): Promise<boolean> {

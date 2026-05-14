@@ -11,6 +11,8 @@ import {
   isAlive,
   ensureCwdTrusted,
   ensureMcpJsonServersEnabled,
+  classifySpawnPane,
+  watchAndDismissSpawnPrompts,
   PROXY_ENV,
   TMUX_PREFIX,
 } from '../src/spawn-manager'
@@ -256,6 +258,152 @@ describe('startSpawn', () => {
     expect(err).not.toBeNull()
     expect(err!.message).toMatch(/invalid cwd/i)
     expect(runner.calls).toHaveLength(0)
+  })
+})
+
+const BYPASS_PROMPT_PANE = `
+────────────────────────────────────────────────────────────────────────────────
+  WARNING: Claude Code running in Bypass Permissions mode
+
+  In Bypass Permissions mode, Claude Code will not ask for your approval
+  before running potentially dangerous commands.
+
+  ❯ 1. No, exit
+    2. Yes, I accept
+
+  Enter to confirm · Esc to cancel
+`
+
+const DANGEROUS_PROMPT_PANE = `
+────────────────────────────────────────────────────────────────────────────────
+  WARNING: Loading development channels
+
+  --dangerously-load-development-channels is for local channel development only.
+
+  Channels: plugin:discord@dancer430-discord
+
+  ❯ 1. I am using this for local development
+    2. Exit
+
+  Enter to confirm · Esc to cancel
+`
+
+const READY_PANE = `
+╭─── Claude Code v2.1.141 ─────────────────────────────────────────────────────╮
+│             Welcome back Some User!                                          │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+  Listening for channel messages from: plugin:discord@dancer430-discord
+`
+
+describe('classifySpawnPane', () => {
+  test('returns null for empty / pre-render pane', () => {
+    expect(classifySpawnPane('')).toBeNull()
+    expect(classifySpawnPane('  spinner... \n')).toBeNull()
+  })
+
+  test('detects the bypass-permissions warning by both header and option-1 label', () => {
+    expect(classifySpawnPane(BYPASS_PROMPT_PANE)).toBe('bypass')
+  })
+
+  test('detects the dangerously-load-channels warning', () => {
+    expect(classifySpawnPane(DANGEROUS_PROMPT_PANE)).toBe('dangerous')
+  })
+
+  test('returns "ready" once the main TUI is visible', () => {
+    expect(classifySpawnPane(READY_PANE)).toBe('ready')
+  })
+
+  test('does not misclassify a partial render that only mentions "Bypass Permissions" in passing', () => {
+    // The main TUI shows a "⏵⏵ bypass permissions on" footer line that
+    // includes the phrase but is NOT the warning. We require the option-1
+    // text "No, exit" too — without it, we should not call this 'bypass'.
+    const noisyReady = READY_PANE + '\n  ⏵⏵ bypass permissions on (shift+tab to cycle)'
+    expect(classifySpawnPane(noisyReady)).toBe('ready')
+  })
+})
+
+describe('watchAndDismissSpawnPrompts', () => {
+  // Helper: build a FakeTmuxRunner that returns scripted exit codes / panes
+  // for each tmux invocation. Each step represents ONE call to runner.run().
+  type Step = { pane: string } | { sent: true } | { fail: true }
+  function script(...steps: Step[]): FakeTmuxRunner {
+    const runner = new FakeTmuxRunner()
+    for (const s of steps) {
+      if ('fail' in s) runner.scriptExit(1, '', 'no such session')
+      else if ('sent' in s) runner.scriptExit(0, '', '')
+      else runner.scriptExit(0, s.pane, '')
+    }
+    return runner
+  }
+
+  const NOOP_OPTS = { pollIntervalMs: 0, maxWaitMs: 5000, sleep: async () => {} }
+
+  test('sends "2" then Enter when both prompts appear in sequence', async () => {
+    const runner = script(
+      { pane: BYPASS_PROMPT_PANE }, { sent: true },
+      { pane: DANGEROUS_PROMPT_PANE }, { sent: true },
+      { pane: READY_PANE },
+    )
+    const sent = await watchAndDismissSpawnPrompts(runner, 'claude-x', { ...NOOP_OPTS, maxPolls: 4 })
+    expect(sent).toEqual(['2', 'Enter'])
+    expect(runner.calls.filter(c => c[0] === 'send-keys')).toEqual([
+      ['send-keys', '-t', 'claude-x', '2'],
+      ['send-keys', '-t', 'claude-x', 'Enter'],
+    ])
+  })
+
+  test('sends only Enter when bypass is already accepted and only the dangerously-load prompt appears', async () => {
+    const runner = script(
+      { pane: DANGEROUS_PROMPT_PANE }, { sent: true },
+      { pane: READY_PANE },
+    )
+    const sent = await watchAndDismissSpawnPrompts(runner, 'claude-y', { ...NOOP_OPTS, maxPolls: 3 })
+    expect(sent).toEqual(['Enter'])
+    expect(runner.calls.filter(c => c[0] === 'send-keys')).toEqual([
+      ['send-keys', '-t', 'claude-y', 'Enter'],
+    ])
+  })
+
+  test('sends nothing if the main TUI is reached without showing any warning', async () => {
+    const runner = script({ pane: READY_PANE })
+    const sent = await watchAndDismissSpawnPrompts(runner, 'claude-z', { ...NOOP_OPTS, maxPolls: 2 })
+    expect(sent).toEqual([])
+    expect(runner.calls.some(c => c[0] === 'send-keys')).toBe(false)
+  })
+
+  test('stops polling when capture-pane fails (session died)', async () => {
+    const runner = script(
+      { pane: BYPASS_PROMPT_PANE }, { sent: true },
+      { fail: true },
+    )
+    const sent = await watchAndDismissSpawnPrompts(runner, 'claude-dead', { ...NOOP_OPTS, maxPolls: 5 })
+    expect(sent).toEqual(['2'])
+  })
+
+  test('does not double-dismiss: even if the bypass prompt lingers on a later poll, only one "2" goes out', async () => {
+    // Simulates the case where the pane still shows the warning on the very
+    // next capture (claude hasn't redrawn yet). After we record bypass as
+    // dismissed, we must not send "2" again — that would type "2" into the
+    // input box once the TUI renders.
+    const runner = script(
+      { pane: BYPASS_PROMPT_PANE }, { sent: true },
+      { pane: BYPASS_PROMPT_PANE },                  // no send this iter
+      { pane: READY_PANE },
+    )
+    const sent = await watchAndDismissSpawnPrompts(runner, 'claude-once', { ...NOOP_OPTS, maxPolls: 5 })
+    expect(sent).toEqual(['2'])
+  })
+
+  test('respects maxPolls and returns without throwing if no prompt nor ready ever appears', async () => {
+    const runner = script(
+      { pane: '' }, { pane: '' }, { pane: '' },     // 3 polls of empty pane
+    )
+    const sent = await watchAndDismissSpawnPrompts(runner, 'claude-idle', { ...NOOP_OPTS, maxPolls: 3 })
+    expect(sent).toEqual([])
+    // We polled exactly maxPolls times; no send-keys.
+    expect(runner.calls.filter(c => c[0] === 'capture-pane')).toHaveLength(3)
+    expect(runner.calls.some(c => c[0] === 'send-keys')).toBe(false)
   })
 })
 
