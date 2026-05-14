@@ -74,6 +74,14 @@ same thread. Delete the entry to force a fresh thread.
 The bot needs **Create Public Threads** permission on the parent channel
 to auto-create.
 
+`create_thread`-spawned children inherit `claudePath` + `claudeArgs` from
+the daemon's `CLAUDE_DISCORD_SPAWN_CMD` env var — without the channel
+plugin flag in there, spawned children won't load the discord MCP and
+won't register, so messages routed to their threads vanish. See the
+"Spawning Claude sessions via the `create_thread` MCP tool" section in
+the [README](./README.md#spawning-claude-sessions-via-the-create_thread-mcp-tool)
+for the full sequence and diagnosis steps.
+
 ## Mention detection
 
 In channels with `requireMention: true`, any of the following triggers the bot:

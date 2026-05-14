@@ -435,6 +435,8 @@ An authorized user can post `起子区 /abs/path` in the configured parent chann
 
 - `CLAUDE_DISCORD_SPAWN_CMD` — overrides the spawn argv. Whitespace-split. Default: `claude --channels plugin:discord@dancer430-discord`. Use this on dev installs (`claude --dangerously-load-development-channels …`) or to wrap in `tmux` if your `claude` binary requires a TTY.
 
+  This same argv drives **both** spawn paths — the parent-channel `起子区` trigger AND the `create_thread` MCP tool (see below). The first whitespace-split token is the binary; the rest are forwarded verbatim as args. If you set `CLAUDE_DISCORD_SPAWN_CMD=/usr/bin/claude --channels plugin:foo`, every spawned child gets `/usr/bin/claude --channels plugin:foo …` in its tmux command.
+
 **Security:**
 
 - Only senders listed in `access.allowFrom` can trigger a spawn.
@@ -452,6 +454,48 @@ discord daemon: spawn outcome=err code=path_outside_allowlist raw_path=/etc ...
 ```
 
 Subprocess stdout/stderr go to `~/.claude/channels/discord/spawned/spawn-<id>.log`.
+
+### Spawning Claude sessions via the `create_thread` MCP tool
+
+When a manager session calls the `create_thread` tool with `{ cwd, label?, thread_name? }`, the daemon spawns a child `claude` in a **detached tmux session** (`claude-<session_id>`) and waits for it to auto-register before returning the thread info.
+
+**How the spawn command is built:**
+
+The daemon's spawn-manager assembles a single shell command that tmux executes inside the new session:
+
+```sh
+cd '<cwd>' && \
+  export http_proxy=… && export https_proxy=… && export all_proxy=… && \
+  [CLAUDE_SESSION_ID=<sid>] [DISCORD_THREAD_NAME='…'] DISCORD_THREAD_ID=auto \
+  '<claudePath>' '<claudeArgs[0]>' '<claudeArgs[1]>' …
+```
+
+`claudePath` + `claudeArgs` come from the **same** `CLAUDE_DISCORD_SPAWN_CMD` env var documented above. If you launched the daemon with `CLAUDE_DISCORD_SPAWN_CMD="claude --channels plugin:discord@dancer430-discord"`, every `create_thread`-spawned child also gets that flag — which is what makes the MCP discord plugin load in the child, and thus what makes it `register` with the daemon over the IPC socket. Without that flag (or its `--dangerously-load-development-channels` cousin for dev installs), the child comes up at the welcome prompt with no plugin loaded, never registers, and messages routed to its thread have nowhere to land. The failure mode looks like: `bindings.json` shows `managed: true` for the new session, but `daemon.log` has no matching `register outcome=ok` line.
+
+**Pre-approving the trust + MCP dialogs:**
+
+Before invoking tmux, the spawn-manager writes two flags into `~/.claude.json` for the target `cwd` so the child never blocks on an interactive prompt:
+
+- `projects[cwd].hasTrustDialogAccepted = true` — skips the workspace-trust dialog. Without this, claude would block before loading any MCP server, so the discord plugin would never start.
+- If `<cwd>/.mcp.json` declares any `mcpServers`, their names are union-added to `projects[cwd].enabledMcpjsonServers` (and removed from `disabledMcpjsonServers`). This skips the "New MCP server found in .mcp.json" prompt that otherwise gates MCP load.
+
+Both writes are atomic (temp+rename), idempotent (no write when nothing changes), and best-effort: a write failure logs to `daemon.log` but does not block the tmux launch. Tests inject a temp `claudeConfigPath` so the integration suite never touches the developer's real `~/.claude.json` — see `tests/spawn-manager.test.ts` for the contract.
+
+**Configuring `parentChannelId`:**
+
+`create_thread` spawns new threads under the channel set as `access.parentChannelId`. To change which channel hosts new threads, **run the skill in your local terminal** (the skill explicitly refuses Discord-originated mutations to prevent prompt-injection):
+
+```
+/discord:access set parentChannelId <channel-snowflake>
+```
+
+The skill writes `access.json` and also opts that channel into `groups`. The daemon re-reads `access.json` on each spawn, so the change takes effect on the next `create_thread` without a restart.
+
+**Diagnosing a spawned session that doesn't respond:**
+
+1. Confirm the binding exists: `~/.claude/channels/discord/bindings.json` should have `managed: true` and a `tmux_session` entry.
+2. Confirm the child registered: grep `~/.claude/channels/discord/daemon.log` for `register outcome=ok ... session_id=<sid>`. If absent, the plugin did not load — check `CLAUDE_DISCORD_SPAWN_CMD` and run `ps eww -p <pid-from-tmux-list-panes>` against the tmux pane PID to inspect the child's actual argv.
+3. Attach to the tmux session (`tmux attach -t claude-<sid>`) to see whether claude is blocked on a dialog (trust, MCP approval, OAuth) that the pre-approvals didn't cover.
 
 ## License
 

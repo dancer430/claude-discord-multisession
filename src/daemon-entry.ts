@@ -91,13 +91,23 @@ export async function runDaemon(): Promise<void> {
   // Operator can override the full `claude` invocation via env. Default
   // matches the README's plugin-install form. Shell-split is intentionally
   // naive (whitespace-only) — operators who need quoting should pre-split.
+  // The first token is the binary; everything after is forwarded as args
+  // to BOTH spawn paths: the parent-channel `起子区 <path>` trigger
+  // (handleSpawnCommand below) AND the MCP `create_thread` tool path
+  // inside startDaemon → startSpawn. Keeping them in sync avoids the
+  // failure mode where `create_thread`-spawned children come up without
+  // the channel plugin and never register with the daemon.
   const spawnCommand = (process.env.CLAUDE_DISCORD_SPAWN_CMD ?? 'claude --channels plugin:discord@dancer430-discord')
     .trim()
     .split(/\s+/)
     .filter(s => s.length > 0)
+  const claudePath = spawnCommand[0] ?? 'claude'
+  const claudeArgs = spawnCommand.slice(1)
 
   const handle = await startDaemon({
     stateDir, ops, idleExitMs: 60_000,
+    claudePath,
+    claudeArgs,
     onShutdown: async () => {
       try { await client.destroy() } catch {}
       process.exit(0)

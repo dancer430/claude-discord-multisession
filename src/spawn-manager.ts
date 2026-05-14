@@ -124,6 +124,16 @@ export interface SpawnInput {
    * ensureMcpJsonServersEnabled (tests).
    */
   claudeConfigPath?: string
+  /**
+   * Extra args appended to the `claude` invocation in the order given.
+   * Each arg is shell-escaped independently. The typical use is loading
+   * a marketplace-installed channel plugin in the spawned child, e.g.
+   * `['--channels', 'plugin:discord@dancer430-discord']` — without this,
+   * the spawned claude won't load the discord MCP plugin and the daemon
+   * will never see a `register` for the session, so messages routed to
+   * its thread have nowhere to land. See `docs/spawn-session.md`.
+   */
+  claudeArgs?: string[]
 }
 
 /**
@@ -246,7 +256,7 @@ export async function ensureMcpJsonServersEnabled(cwd: string, configPath?: stri
  * before invoking tmux if cwd contains shell-unsafe characters.
  */
 export async function startSpawn(input: SpawnInput): Promise<string> {
-  const { runner, sessionId, cwd, label, threadNameOverride, claudePath, claudeConfigPath } = input
+  const { runner, sessionId, cwd, label, threadNameOverride, claudePath, claudeConfigPath, claudeArgs } = input
   if (!SAFE_CWD.test(cwd)) {
     throw new Error(`invalid cwd: contains characters outside [A-Za-z0-9 _.-/]`)
   }
@@ -280,7 +290,10 @@ export async function startSpawn(input: SpawnInput): Promise<string> {
     prefixes.push(`DISCORD_THREAD_NAME=${shellEscape(threadName)}`)
   }
   prefixes.push('DISCORD_THREAD_ID=auto')
-  const launch = `${prefixes.join(' ')} ${shellEscape(claudePath)}`
+  const argsTail = claudeArgs && claudeArgs.length > 0
+    ? ' ' + claudeArgs.map(shellEscape).join(' ')
+    : ''
+  const launch = `${prefixes.join(' ')} ${shellEscape(claudePath)}${argsTail}`
   const command = `cd ${shellEscape(cwd)} && ${exports.join(' && ')} && ${launch}`
   const r = await runner.run(['new-session', '-d', '-s', name, command])
   if (r.exitCode !== 0) {

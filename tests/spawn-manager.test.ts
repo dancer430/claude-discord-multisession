@@ -178,6 +178,70 @@ describe('startSpawn', () => {
     expect(err!.message).toContain('duplicate session')
   })
 
+  test('with claudeArgs appends shell-escaped args after claudePath, in order', async () => {
+    const runner = new FakeTmuxRunner()
+    runner.scriptExit(0)
+    await startSpawn({
+      runner,
+      sessionId: 'sidargs1sidar',
+      cwd: '/tmp/proj',
+      claudePath: '/usr/bin/claude',
+      claudeArgs: ['--channels', 'plugin:discord@dancer430-discord'],
+    })
+    const command = runner.calls[0][4]
+    // Each arg lands quoted and ordered after the claudePath. The full tail
+    // looks like:  '/usr/bin/claude' '--channels' 'plugin:discord@dancer430-discord'
+    expect(command).toMatch(
+      /'\/usr\/bin\/claude' '--channels' 'plugin:discord@dancer430-discord'(?:\s|$)/,
+    )
+  })
+
+  test('with empty claudeArgs leaves the launch line unchanged', async () => {
+    const runner = new FakeTmuxRunner()
+    runner.scriptExit(0)
+    await startSpawn({
+      runner,
+      sessionId: 'sidempty1sid',
+      cwd: '/tmp/proj',
+      claudePath: '/usr/bin/claude',
+      claudeArgs: [],
+    })
+    const command = runner.calls[0][4]
+    // No trailing args, no stray whitespace before the &&/EOL after the claudePath.
+    expect(command).toMatch(/'\/usr\/bin\/claude'\s*$/)
+  })
+
+  test('without claudeArgs (undefined) behaves identically to legacy callers', async () => {
+    const runner = new FakeTmuxRunner()
+    runner.scriptExit(0)
+    await startSpawn({
+      runner,
+      sessionId: 'sidnoneunsid',
+      cwd: '/tmp/proj',
+      claudePath: '/usr/bin/claude',
+    })
+    const command = runner.calls[0][4]
+    expect(command).toMatch(/'\/usr\/bin\/claude'\s*$/)
+  })
+
+  test('shell-escapes args that contain quotes and spaces', async () => {
+    const runner = new FakeTmuxRunner()
+    runner.scriptExit(0)
+    await startSpawn({
+      runner,
+      sessionId: 'sidescapsidesc',
+      cwd: '/tmp/proj',
+      claudePath: '/usr/bin/claude',
+      // A space inside an arg would break the shell if unescaped; an embedded
+      // single-quote would break naive escaping. Both must be safely passed.
+      claudeArgs: ["--prompt=hi there", "it's me"],
+    })
+    const command = runner.calls[0][4]
+    // The single-quote-escaping convention used elsewhere is '\'' inside the quoted region.
+    expect(command).toContain("'--prompt=hi there'")
+    expect(command).toContain("'it'\\''s me'")
+  })
+
   test('rejects cwd containing shell-unsafe chars', async () => {
     const runner = new FakeTmuxRunner()
     let err: Error | null = null

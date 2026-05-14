@@ -39,6 +39,14 @@ export type DaemonOpts = {
   /** Override the claude binary path used by create_thread spawn. Defaults to 'claude' from PATH. */
   claudePath?: string
   /**
+   * Extra args appended to every `claude` invocation by the create_thread
+   * spawn path. Typically populated by daemon-entry from the same
+   * `CLAUDE_DISCORD_SPAWN_CMD` env var that drives parent-channel spawn —
+   * keeping both spawn paths in sync ensures the MCP discord plugin loads
+   * in the child regardless of which entry point created the session.
+   */
+  claudeArgs?: string[]
+  /**
    * Override the user-config path the spawn-manager pre-writes trust into
    * for each spawned cwd. Defaults to `~/.claude.json`. Tests set this to
    * a temp file so the integration suite never touches the developer's
@@ -246,6 +254,7 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
   const { stateDir, ops, idleExitMs, onShutdown } = opts
   const tmuxRunner: TmuxRunner = opts.tmuxRunner ?? new RealTmuxRunner()
   const claudePath = opts.claudePath ?? 'claude'
+  const claudeArgs = opts.claudeArgs
   const claudeConfigPath = opts.claudeConfigPath
   mkdirSync(stateDir, { recursive: true, mode: 0o700 })
   const sockPath = join(stateDir, 'daemon.sock')
@@ -585,7 +594,7 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
     })
 
     try {
-      await startSpawn({ runner: tmuxRunner, sessionId, cwd, label, threadNameOverride, claudePath, claudeConfigPath })
+      await startSpawn({ runner: tmuxRunner, sessionId, cwd, label, threadNameOverride, claudePath, claudeArgs, claudeConfigPath })
     } catch (e) {
       spawnPending.delete(sessionId)
       return errText('create_thread_spawn_failed', String((e as Error).message))
