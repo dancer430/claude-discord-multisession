@@ -186,6 +186,7 @@ describe('validateSpawnRequest', () => {
   })
 })
 
+import { mock } from 'bun:test'
 import { spawnClaude } from '../src/spawn-session'
 
 describe('spawnClaude', () => {
@@ -278,5 +279,24 @@ describe('spawnClaude', () => {
     if (r.ok) throw new Error('unreachable')
     expect(r.code).toBe('spawn_failed')
     expect(r.message).toContain('EACCES')
+  })
+})
+
+describe('spawnClaude fd-leak fix', () => {
+  test('closes fd when spawn throws (no fd leak)', () => {
+    const closedFds: number[] = []
+    mock.module('fs', () => ({
+      ...require('fs'),
+      closeSync: (fd: number) => { closedFds.push(fd) },
+    }))
+    const failSpawn: any = () => { throw Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }) }
+    const r = spawnClaude({
+      cwd: '/root/sub', threadName: 'sub',
+      command: ['no-such'], env: {}, logPath: '/tmp/x.log',
+      spawn: failSpawn,
+      openSync: ((_: string, _f: string, _m: number) => 42) as any,
+    })
+    expect(r.ok).toBe(false)
+    expect(closedFds).toEqual([42])
   })
 })

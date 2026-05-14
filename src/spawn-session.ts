@@ -112,6 +112,7 @@ export function parseSpawnCommand(
 }
 
 import type { spawn as NodeSpawn } from 'child_process'
+import { closeSync } from 'fs'
 import type { openSync as NodeOpenSync } from 'fs'
 
 export type SpawnOk = { ok: true; pid: number }
@@ -158,6 +159,7 @@ export function spawnClaude(args: {
     child.unref()
     return { ok: true, pid: child.pid ?? -1 }
   } catch (err) {
+    try { closeSync(fd) } catch {}
     return { ok: false, code: 'spawn_failed', message: (err as Error).message }
   }
 }
