@@ -114,6 +114,7 @@ export function parseSpawnCommand(
 import type { spawn as NodeSpawn } from 'child_process'
 import { closeSync } from 'fs'
 import type { openSync as NodeOpenSync } from 'fs'
+import type { DiscordOps } from './discord-ops'
 
 export type SpawnOk = { ok: true; pid: number }
 export type SpawnErr = { ok: false; code: 'spawn_failed'; message: string }
@@ -162,4 +163,120 @@ export function spawnClaude(args: {
     try { closeSync(fd) } catch {}
     return { ok: false, code: 'spawn_failed', message: (err as Error).message }
   }
+}
+
+/**
+ * Single-line audit log matching the `logRegister` style in daemon.ts:
+ *   `discord daemon: spawn outcome=ok pid=12345 cwd=/root/sub ...`
+ * Quoting rules also match: strings with whitespace / `"` get JSON-quoted,
+ * empty strings get rendered as `""` to stay visually distinct from
+ * unset fields.
+ */
+export function logSpawn(fields: Record<string, unknown>): void {
+  const parts: string[] = []
+  for (const [k, v] of Object.entries(fields)) {
+    if (v === undefined || v === null) continue
+    const needsQuote = typeof v === 'string' && (v === '' || /[\s"]/.test(v))
+    parts.push(`${k}=${needsQuote ? JSON.stringify(v) : String(v)}`)
+  }
+  process.stderr.write(`discord daemon: spawn ${parts.join(' ')}\n`)
+}
+
+const REJECT_MESSAGES: Record<SpawnRejectCode, (detail: string) => string> = {
+  not_authorized: () => '',   // silent
+  allowlist_empty: () => '❌ 启动失败：管理员尚未配置 `spawnAllowedRoots`，spawn 功能未开启',
+  path_not_absolute: (d) => `❌ 启动失败：路径必须是绝对路径（${d}）`,
+  path_not_found: (d) => `❌ 启动失败：路径不存在 — ${d}`,
+  path_not_directory: (d) => `❌ 启动失败：路径不是目录 — ${d}`,
+  path_outside_allowlist: (d) => `❌ 启动失败：路径不在 spawnAllowedRoots 白名单内 — ${d}`,
+}
+
+function randomShortId(): string {
+  return Math.random().toString(36).slice(2, 10)
+}
+
+/**
+ * End-to-end orchestrator: validates the request, posts an ack on the
+ * parent channel, spawns the subprocess, posts a follow-up only on
+ * failure, and audit-logs the outcome.
+ *
+ * All side-effecting deps are injected so this is testable without booting
+ * discord.js or touching the real filesystem (aside from a stubbed openSync).
+ */
+export async function handleSpawnCommand(args: {
+  rawPath: string
+  senderId: string
+  parentChannelId: string
+  access: Access
+  ops: DiscordOps
+  command: string[]
+  env: NodeJS.ProcessEnv
+  stateDir: string
+  statSync: StatFn
+  spawn: typeof NodeSpawn
+  openSync: typeof NodeOpenSync
+  log: (fields: Record<string, unknown>) => void
+  homeDir: string
+}): Promise<void> {
+  const validation = validateSpawnRequest({
+    rawPath: args.rawPath,
+    senderId: args.senderId,
+    parentChannelId: args.parentChannelId,
+    access: args.access,
+    statSync: args.statSync,
+    homeDir: args.homeDir,
+  })
+
+  if (!validation.ok) {
+    args.log({
+      outcome: 'err',
+      sender_id: args.senderId,
+      parent_id: args.parentChannelId,
+      raw_path: args.rawPath,
+      code: validation.code,
+      message: validation.message,
+    })
+    const text = REJECT_MESSAGES[validation.code](validation.message)
+    if (text) await args.ops.reply(args.parentChannelId, text)
+    return
+  }
+
+  // Ack BEFORE spawn so the user sees we accepted the command even if the
+  // subprocess fails to start.
+  await args.ops.reply(args.parentChannelId, `🚀 正在为 \`${validation.cwd}\` 启动 Claude…`)
+
+  const logPath = `${args.stateDir}/spawned/spawn-${randomShortId()}.log`
+  const result = spawnClaude({
+    cwd: validation.cwd,
+    threadName: validation.threadName,
+    command: args.command,
+    env: args.env,
+    logPath,
+    spawn: args.spawn,
+    openSync: args.openSync,
+  })
+
+  if (!result.ok) {
+    args.log({
+      outcome: 'err',
+      sender_id: args.senderId,
+      parent_id: args.parentChannelId,
+      raw_path: args.rawPath,
+      cwd: validation.cwd,
+      code: result.code,
+      message: result.message,
+    })
+    await args.ops.reply(args.parentChannelId, `❌ 启动失败：${result.message}`)
+    return
+  }
+
+  args.log({
+    outcome: 'ok',
+    sender_id: args.senderId,
+    parent_id: args.parentChannelId,
+    raw_path: args.rawPath,
+    cwd: validation.cwd,
+    pid: result.pid,
+    log_path: logPath,
+  })
 }

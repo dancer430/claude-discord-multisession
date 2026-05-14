@@ -300,3 +300,138 @@ describe('spawnClaude fd-leak fix', () => {
     expect(closedFds).toEqual([42])
   })
 })
+
+import { handleSpawnCommand } from '../src/spawn-session'
+import { FakeDiscordOps } from '../src/discord-ops'
+
+describe('handleSpawnCommand', () => {
+  function setup(over: Partial<Access> = {}) {
+    const ops = new FakeDiscordOps()
+    const spawnStub = (() => {
+      const calls: any[] = []
+      const fn: any = (cmd: string, args: string[], opts: any) => {
+        calls.push({ cmd, args, opts })
+        return { pid: 999, unref() {} }
+      }
+      fn.calls = calls
+      return fn
+    })()
+    const openSyncStub: any = () => 5
+    const logCalls: any[] = []
+    const access: Access = { ...defaultAccess(), allowFrom: ['user-1'], spawnAllowedRoots: ['/root'], ...over }
+    return { ops, spawnStub, openSyncStub, logCalls, access }
+  }
+
+  test('happy path: ack reply, spawn invoked, success log', async () => {
+    const { ops, spawnStub, openSyncStub, logCalls, access } = setup()
+    await handleSpawnCommand({
+      rawPath: '/root/sub',
+      senderId: 'user-1',
+      parentChannelId: 'parent-1',
+      access,
+      ops,
+      command: ['claude', '--channels', 'plugin:discord@x'],
+      env: { PATH: '/bin' },
+      stateDir: '/tmp/state',
+      statSync: ((p: string) => ({ isDirectory: () => true })) as any,
+      spawn: spawnStub,
+      openSync: openSyncStub,
+      log: (fields) => logCalls.push(fields),
+      homeDir: '/Users/me',
+    })
+
+    const replies = ops.calls.filter(c => c.kind === 'reply')
+    expect(replies).toHaveLength(1)
+    expect(String((replies[0] as any).text)).toContain('/root/sub')
+    expect(spawnStub.calls).toHaveLength(1)
+    expect(spawnStub.calls[0].opts.cwd).toBe('/root/sub')
+    expect(logCalls).toHaveLength(1)
+    expect(logCalls[0].outcome).toBe('ok')
+    expect(logCalls[0].pid).toBe(999)
+  })
+
+  test('rejection: not_authorized → silent (no reply), err log only', async () => {
+    const { ops, spawnStub, openSyncStub, logCalls, access } = setup()
+    await handleSpawnCommand({
+      rawPath: '/root/sub', senderId: 'someone-else',
+      parentChannelId: 'parent-1', access, ops,
+      command: ['claude'], env: {}, stateDir: '/tmp/state',
+      statSync: (() => ({ isDirectory: () => true })) as any,
+      spawn: spawnStub, openSync: openSyncStub,
+      log: (f) => logCalls.push(f), homeDir: '/Users/me',
+    })
+    expect(ops.calls.filter(c => c.kind === 'reply')).toHaveLength(0)
+    expect(spawnStub.calls).toHaveLength(0)
+    expect(logCalls).toHaveLength(1)
+    expect(logCalls[0].outcome).toBe('err')
+    expect(logCalls[0].code).toBe('not_authorized')
+  })
+
+  test('rejection: path_outside_allowlist → error reply, err log', async () => {
+    const { ops, spawnStub, openSyncStub, logCalls, access } = setup()
+    await handleSpawnCommand({
+      rawPath: '/elsewhere', senderId: 'user-1',
+      parentChannelId: 'parent-1', access, ops,
+      command: ['claude'], env: {}, stateDir: '/tmp/state',
+      statSync: (() => ({ isDirectory: () => true })) as any,
+      spawn: spawnStub, openSync: openSyncStub,
+      log: (f) => logCalls.push(f), homeDir: '/Users/me',
+    })
+    const replies = ops.calls.filter(c => c.kind === 'reply')
+    expect(replies).toHaveLength(1)
+    expect(String((replies[0] as any).text)).toMatch(/spawnAllowedRoots|白名单/)
+    expect(spawnStub.calls).toHaveLength(0)
+    expect(logCalls[0].outcome).toBe('err')
+    expect(logCalls[0].code).toBe('path_outside_allowlist')
+  })
+
+  test('rejection: allowlist_empty → error reply mentions config', async () => {
+    const { ops, spawnStub, openSyncStub, logCalls, access } = setup({ spawnAllowedRoots: [] })
+    await handleSpawnCommand({
+      rawPath: '/anything', senderId: 'user-1',
+      parentChannelId: 'parent-1', access, ops,
+      command: ['claude'], env: {}, stateDir: '/tmp/state',
+      statSync: (() => ({ isDirectory: () => true })) as any,
+      spawn: spawnStub, openSync: openSyncStub,
+      log: (f) => logCalls.push(f), homeDir: '/Users/me',
+    })
+    expect(ops.calls.filter(c => c.kind === 'reply')).toHaveLength(1)
+    expect(spawnStub.calls).toHaveLength(0)
+    expect(logCalls[0].code).toBe('allowlist_empty')
+  })
+
+  test('spawn-side failure: ack present, plus failure reply, err log', async () => {
+    const { ops, openSyncStub, logCalls, access } = setup()
+    const failSpawn: any = () => { throw Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }) }
+    await handleSpawnCommand({
+      rawPath: '/root/sub', senderId: 'user-1',
+      parentChannelId: 'parent-1', access, ops,
+      command: ['no-such'], env: {}, stateDir: '/tmp/state',
+      statSync: (() => ({ isDirectory: () => true })) as any,
+      spawn: failSpawn, openSync: openSyncStub,
+      log: (f) => logCalls.push(f), homeDir: '/Users/me',
+    })
+    const replies = ops.calls.filter(c => c.kind === 'reply')
+    expect(replies.length).toBe(2)
+    expect(String((replies[0] as any).text)).toContain('启动')   // ack
+    expect(String((replies[1] as any).text)).toMatch(/启动失败|ENOENT/)
+    expect(logCalls[0].outcome).toBe('err')
+    expect(logCalls[0].code).toBe('spawn_failed')
+  })
+
+  test('log path lives under stateDir/spawned', async () => {
+    const { ops, spawnStub, logCalls, access } = setup()
+    let opened = ''
+    const openSyncStub: any = (p: string) => { opened = p; return 5 }
+    await handleSpawnCommand({
+      rawPath: '/root/sub', senderId: 'user-1',
+      parentChannelId: 'parent-1', access, ops,
+      command: ['claude'], env: {}, stateDir: '/tmp/state',
+      statSync: (() => ({ isDirectory: () => true })) as any,
+      spawn: spawnStub, openSync: openSyncStub,
+      log: (f) => logCalls.push(f), homeDir: '/Users/me',
+    })
+    expect(opened.startsWith('/tmp/state/spawned/')).toBe(true)
+    expect(opened.endsWith('.log')).toBe(true)
+  })
+})
