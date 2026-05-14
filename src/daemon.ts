@@ -499,6 +499,8 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
           return await handleCloseThread(args)
         case 'list_threads':
           return await handleListThreads()
+        case 'list_project_dirs':
+          return await handleListProjectDirs(args)
         default:
           return fail(`unknown tool: ${name}`)
       }
@@ -525,6 +527,31 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
     const access = loadAccess(accessFile)
     if (!access.parentChannelId) {
       return errText('create_thread_parent_unset', 'access.parentChannelId is not set')
+    }
+
+    const { resolveThreadCwdRoot } = await import('./access')
+    const { realpathSync } = await import('fs')
+    const pathMod = await import('path')
+    const configuredRoot = resolveThreadCwdRoot(access)
+    // Sync realpath here is deliberate: yielding the event loop between
+    // tool_call arrival and the spawnPending.set() below opens a race
+    // window where a concurrent register on the same sessionId can land
+    // first and create a non-managed binding, then this handler trips
+    // create_thread_cwd_has_manual_session instead of recognising its
+    // own child.
+    let realRoot: string
+    try {
+      realRoot = realpathSync(configuredRoot)
+    } catch (e) {
+      return errText('create_thread_root_invalid', `threadCwdRoot ${configuredRoot}: ${String((e as Error).message)}`)
+    }
+    // statSync above already verified cwd exists; realpath canonicalises
+    // symlinks and `..` so `${root}/../sibling` can't slip past relative().
+    const realCwd = realpathSync(cwd)
+    const rel = pathMod.relative(realRoot, realCwd)
+    if (rel.startsWith('..') || pathMod.isAbsolute(rel)) {
+      return errText('create_thread_cwd_outside_root',
+        `cwd ${cwd} is outside threadCwdRoot ${configuredRoot}`)
     }
 
     const { computeSessionId, tmuxSessionName, startSpawn, killSpawn, isAlive } = await import('./spawn-manager')
@@ -661,6 +688,27 @@ export async function startDaemon(opts: DaemonOpts): Promise<DaemonHandle> {
     }
     rows.sort((a, b) => b.created_at - a.created_at)
     return okJson(rows)
+  }
+
+  async function handleListProjectDirs(args: Record<string, unknown>): Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }> {
+    const access = loadAccess(accessFile)
+    const { resolveThreadCwdRoot } = await import('./access')
+    const root = resolveThreadCwdRoot(access)
+    const query = args.query !== undefined ? String(args.query) : undefined
+    try {
+      const { scanProjectDirs } = await import('./project-dirs')
+      const r = await scanProjectDirs(root, { query })
+      return okJson({
+        root,
+        count: r.matches.length,
+        truncated: r.truncated,
+        matches: r.matches,
+      })
+    } catch (e) {
+      const msg = String((e as Error).message)
+      if (/timeout/i.test(msg)) return errText('list_project_dirs_timeout', msg)
+      return errText('list_project_dirs_root_invalid', msg)
+    }
   }
 
   async function reconcileOnStartup(): Promise<void> {

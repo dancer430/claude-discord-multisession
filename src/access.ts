@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'fs'
-import { dirname } from 'path'
+import { dirname, join } from 'path'
+import { homedir } from 'os'
 
 export type PendingEntry = {
   senderId: string
@@ -43,6 +44,13 @@ export type Access = {
    * When false, the hook prints `{}` and Claude Code's built-in UI runs.
    */
   askUserQuestionHook?: boolean
+  /**
+   * Root directory under which `create_thread` accepts `cwd`, and
+   * `list_project_dirs` scans for `.git` repos. When absent,
+   * `resolveThreadCwdRoot` returns `~/A-project`. Treated as an
+   * absolute path; symlinks are resolved at validation time.
+   */
+  threadCwdRoot?: string
 }
 
 export function defaultAccess(): Access {
@@ -72,6 +80,7 @@ export function loadAccess(file: string): Access {
       parentChannelId: parsed.parentChannelId,
       reactionGuidance: parsed.reactionGuidance,
       askUserQuestionHook: parsed.askUserQuestionHook,
+      threadCwdRoot: parsed.threadCwdRoot,
     }
   } catch {
     try { renameSync(file, `${file}.corrupt-${Date.now()}`) } catch {}
@@ -84,6 +93,10 @@ export function saveAccess(file: string, a: Access): void {
   const tmp = file + '.tmp'
   writeFileSync(tmp, JSON.stringify(a, null, 2) + '\n', { mode: 0o600 })
   renameSync(tmp, file)
+}
+
+export function resolveThreadCwdRoot(a: Access): string {
+  return a.threadCwdRoot ?? join(homedir(), 'A-project')
 }
 
 export function pruneExpired(a: Access): boolean {

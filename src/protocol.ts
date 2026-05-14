@@ -69,7 +69,7 @@ export const ToolCallMsg = z.object({
   id: z.number(),
   name: z.enum([
     'reply', 'react', 'edit_message', 'fetch_messages', 'download_attachment', 'discord_ask',
-    'create_thread', 'close_thread', 'list_threads',
+    'create_thread', 'close_thread', 'list_threads', 'list_project_dirs',
   ]),
   args: z.record(z.string(), z.unknown()),
 })

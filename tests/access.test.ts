@@ -2,11 +2,13 @@ import { test, expect, describe, beforeEach, afterEach } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync, readdirSync, statSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { homedir } from 'os'
 import {
   defaultAccess,
   loadAccess,
   saveAccess,
   pruneExpired,
+  resolveThreadCwdRoot,
   type Access,
 } from '../src/access'
 
@@ -83,5 +85,25 @@ describe('access', () => {
     expect(a).toEqual(defaultAccess())
     const corruptFiles = readdirSync(dir).filter(f => f.startsWith('access.json.corrupt-'))
     expect(corruptFiles).toHaveLength(1)
+  })
+
+  test('threadCwdRoot survives a roundtrip', () => {
+    const a: Access = { ...defaultAccess(), threadCwdRoot: '/custom/root' }
+    saveAccess(file, a)
+    expect(loadAccess(file).threadCwdRoot).toBe('/custom/root')
+  })
+
+  test('threadCwdRoot is absent when not set', () => {
+    saveAccess(file, defaultAccess())
+    expect(loadAccess(file).threadCwdRoot).toBeUndefined()
+  })
+
+  test('resolveThreadCwdRoot returns ~/A-project when unset', () => {
+    expect(resolveThreadCwdRoot(defaultAccess())).toBe(join(homedir(), 'A-project'))
+  })
+
+  test('resolveThreadCwdRoot returns the explicit value when set', () => {
+    const a = { ...defaultAccess(), threadCwdRoot: '/foo/bar' }
+    expect(resolveThreadCwdRoot(a)).toBe('/foo/bar')
   })
 })

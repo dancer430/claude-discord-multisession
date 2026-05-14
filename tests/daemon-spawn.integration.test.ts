@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { createConnection, type Socket } from 'net'
@@ -18,6 +18,7 @@ beforeEach(() => {
   writeFileSync(join(dir, 'access.json'), JSON.stringify({
     dmPolicy: 'allowlist', allowFrom: ['u1'], groups: {}, pending: {},
     parentChannelId: 'parent-123',
+    threadCwdRoot: '/',   // permissive default for existing create_thread tests
   }))
 })
 afterEach(async () => {
@@ -384,5 +385,152 @@ describe('daemon: startup reconcile', () => {
     expect(after['sid-alive'].tmux_session).toBe('claude-sid-alive')
     expect(after['sid-dead'].tmux_session).toBeUndefined()
     expect(after['sid-dead'].managed).toBe(true)  // managed flag preserved
+  })
+})
+
+describe('daemon: list_project_dirs', () => {
+  test('returns matches under threadCwdRoot for a substring query', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'list-projects-root-'))
+    try {
+      mkdirSync(join(root, 'connectors-plugin', '.git'), { recursive: true })
+      mkdirSync(join(root, 'connectors-operator', '.git'), { recursive: true })
+      mkdirSync(join(root, 'unrelated', '.git'), { recursive: true })
+
+      writeFileSync(join(dir, 'access.json'), JSON.stringify({
+        dmPolicy: 'allowlist', allowFrom: ['u1'], groups: {}, pending: {},
+        parentChannelId: 'parent-123',
+        threadCwdRoot: root,
+      }))
+
+      const ops = new FakeDiscordOps()
+      const tmuxRunner = new FakeTmuxRunner()
+      daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+      const sockPath = join(dir, 'daemon.sock')
+      const mgr = await registerDm(sockPath, 'mgr-list-1')
+
+      writeFrame(mgr.sock, { type: 'tool_call', id: 2, name: 'list_project_dirs', args: { query: 'conn' } })
+      const result = await recv(mgr.it)
+      expect(result.isError).toBeFalsy()
+      const payload = JSON.parse(result.content[0].text)
+      expect(payload.root).toBe(root)
+      expect(payload.count).toBe(2)
+      expect(payload.truncated).toBe(false)
+      expect(payload.matches.map((m: any) => m.relative).sort())
+        .toEqual(['connectors-operator', 'connectors-plugin'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('returns root_invalid when threadCwdRoot does not exist', async () => {
+    writeFileSync(join(dir, 'access.json'), JSON.stringify({
+      dmPolicy: 'allowlist', allowFrom: ['u1'], groups: {}, pending: {},
+      parentChannelId: 'parent-123',
+      threadCwdRoot: '/nonexistent-root-' + Date.now(),
+    }))
+
+    const ops = new FakeDiscordOps()
+    const tmuxRunner = new FakeTmuxRunner()
+    daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+    const sockPath = join(dir, 'daemon.sock')
+    const mgr = await registerDm(sockPath, 'mgr-list-2')
+
+    writeFrame(mgr.sock, { type: 'tool_call', id: 2, name: 'list_project_dirs', args: {} })
+    const result = await recv(mgr.it)
+    expect(result.isError).toBe(true)
+    expect(JSON.parse(result.content[0].text).error).toBe('list_project_dirs_root_invalid')
+  })
+})
+
+describe('daemon: create_thread cwd guard', () => {
+  test('rejects cwd outside threadCwdRoot', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cwd-guard-root-'))
+    const outside = mkdtempSync(join(tmpdir(), 'cwd-guard-outside-'))
+    try {
+      writeFileSync(join(dir, 'access.json'), JSON.stringify({
+        dmPolicy: 'allowlist', allowFrom: ['u1'], groups: {}, pending: {},
+        parentChannelId: 'parent-123',
+        threadCwdRoot: root,
+      }))
+
+      const ops = new FakeDiscordOps()
+      const tmuxRunner = new FakeTmuxRunner()
+      daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+      const sockPath = join(dir, 'daemon.sock')
+      const mgr = await registerDm(sockPath, 'mgr-guard-1')
+
+      writeFrame(mgr.sock, { type: 'tool_call', id: 2, name: 'create_thread', args: { cwd: outside } })
+      const result = await recv(mgr.it)
+      expect(result.isError).toBe(true)
+      expect(JSON.parse(result.content[0].text).error).toBe('create_thread_cwd_outside_root')
+      expect(tmuxRunner.calls).toHaveLength(0)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
+  test('rejects ../ escape via realpath canonicalization', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'cwd-guard-parent-'))
+    const root = join(parent, 'root')
+    const sibling = join(parent, 'sibling')
+    mkdirSync(root)
+    mkdirSync(sibling)
+    try {
+      writeFileSync(join(dir, 'access.json'), JSON.stringify({
+        dmPolicy: 'allowlist', allowFrom: ['u1'], groups: {}, pending: {},
+        parentChannelId: 'parent-123',
+        threadCwdRoot: root,
+      }))
+
+      const ops = new FakeDiscordOps()
+      const tmuxRunner = new FakeTmuxRunner()
+      daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+      const sockPath = join(dir, 'daemon.sock')
+      const mgr = await registerDm(sockPath, 'mgr-guard-2')
+
+      // root/../sibling resolves to a path outside root
+      const escape = join(root, '..', 'sibling')
+      writeFrame(mgr.sock, { type: 'tool_call', id: 2, name: 'create_thread', args: { cwd: escape } })
+      const result = await recv(mgr.it)
+      expect(result.isError).toBe(true)
+      expect(JSON.parse(result.content[0].text).error).toBe('create_thread_cwd_outside_root')
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  test('accepts cwd nested under threadCwdRoot', async () => {
+    // Validation passes; spawn proceeds and tmux is invoked. We
+    // rely on the existing FakeTmuxRunner happy path to confirm
+    // the guard didn't short-circuit.
+    const root = mkdtempSync(join(tmpdir(), 'cwd-guard-accept-'))
+    const inside = join(root, 'subproject')
+    mkdirSync(inside)
+    try {
+      writeFileSync(join(dir, 'access.json'), JSON.stringify({
+        dmPolicy: 'allowlist', allowFrom: ['u1'], groups: {}, pending: {},
+        parentChannelId: 'parent-123',
+        threadCwdRoot: root,
+      }))
+
+      const ops = new FakeDiscordOps()
+      const tmuxRunner = new FakeTmuxRunner()
+      tmuxRunner.scriptExit(0)
+      daemon = await startDaemon({ stateDir: dir, ops, idleExitMs: 60_000, tmuxRunner })
+      const sockPath = join(dir, 'daemon.sock')
+      const mgr = await registerDm(sockPath, 'mgr-guard-3')
+
+      const { sessionId: childSid } = computeSessionId(inside)
+      writeFrame(mgr.sock, { type: 'tool_call', id: 2, name: 'create_thread', args: { cwd: inside } })
+
+      const child = await simulateChildRegister(sockPath, childSid, inside)
+      expect(child.ack.type).toBe('register_ack')
+      const result = await recv(mgr.it)
+      expect(result.isError).toBeFalsy()
+      expect(tmuxRunner.calls[0][0]).toBe('new-session')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
